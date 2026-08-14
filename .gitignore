@@ -1,0 +1,72 @@
+# =========================
+# Environment & Secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# API keys / private keys
+*.pem
+*.key
+*.secret
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+.venv/
+venv/
+env/
+
+# =========================
+# Node.js
+# =========================
+node_modules/
+dist/
+build/
+
+# =========================
+# IDE
+# =========================
+.vscode/
+.idea/
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# Databases
+# =========================
+*.db
+*.sqlite
+*.sqlite3
+
+# =========================
+# Uploaded documents
+# =========================
+uploads/
+documents/
+
+# =========================
+# Blockchain generated files
+# =========================
+blockchain/node_modules/
+blockchain/artifacts/
+blockchain/cache/
+
+# =========================
+# Local AI instructions
+# =========================
+AI_INSTRUCTIONS.md

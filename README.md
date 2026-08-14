@@ -1,2 +1,54 @@
 # LegalVault
-The objective of this hackathon is to develop a blockchain-based eVault system for legal records that can ensure security, transparency, and accessibility for all stakeholders. The system should be able to store, manage, and share legal records securely and efficiently, with the potential to integrate with existing legal databases and case management systems. Requirements: 1. The eVault system should be based on a blockchain platform such as Ethereum, Hyperledger, or Corda, should use smart contracts to manage access, permissions, and transactions. 2. The system should have user-friendly interfaces for lawyers, judges, clients, and other stakeholders to interact with the eVault, with features such as uploading and retrieving documents, tracking changes, and sharing information. 3. The system should ensure the privacy and confidentiality of legal records, with appropriate access controls, encryption, and authentication mechanisms. 4. The system should allow for seamless integration with existing legal databases and case management systems, to ensure interoperability and ease of use. 5. The system should be scalable and adaptable to accommodate future changes and upgrades. Expected Outcomes: 1. A functional prototype of the blockchain-based eVault system for legal records, with a user-friendly interface and features such as document upload, retrieval, and sharing. 2. A detailed design document outlining the architecture, features, and technical specifications of the eVault system. 3. A business plan outlining the potential impact, market opportunities, and revenue models for the eVault system. 4. A presentation of the prototype, design document, and business plan. Impact: The development of a blockchain-based eVault system for legal records can have a significant impact on improving access to justice in India. It can lead to faster, more efficient court proceedings, reduced costs, improved data integrity, and increased trust in the justice system. Moreover, it can provide a secure and transparent platform for storing and sharing legal records, making it easier for clients to access their own records and for lawyers to access relevant case information.
+
+## AI-Assisted Blockchain eVault for Legal Records
+
+SIH1284 Prototype
+
+LegalVault is a prototype blockchain-based eVault designed to securely manage, verify, and share legal records.
+
+It combines AI-assisted document analysis with blockchain-based integrity verification.
+
+## Problem
+
+Legal records need to be:
+- Secure
+- Accessible to authorized stakeholders
+- Resistant to tampering
+- Easy to verify
+- Traceable through their lifecycle
+
+## Proposed Solution
+
+LegalVault provides:
+
+- Secure document storage
+- AI-assisted document analysis
+- Blockchain-based document integrity verification
+- Role-based access
+- Controlled document sharing
+- Version tracking
+- AI-assisted version comparison
+
+## Architecture
+
+```text
+User
+  ↓
+React Frontend
+  ↓
+FastAPI Backend
+  ↓
+ ┌───────────────┬────────────────┐
+ │               │                │
+ ▼               ▼                ▼
+Database      AI Service      File Storage
+                                  │
+                                  ▼
+                            Legal Document
+
+                ↓
+        SHA-256 Document Hash
+                ↓
+          Smart Contract
+                ↓
+            Blockchain
