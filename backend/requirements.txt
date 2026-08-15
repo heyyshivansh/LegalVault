@@ -3,3 +3,5 @@ uvicorn
 sqlalchemy
 python-multipart
 web3
+pyjwt
+bcrypt

@@ -180,7 +180,7 @@ IPFS may be considered later if time permits.
 - [x] Backend
 - [x] Frontend (Phase 1 React + Vite eVault UI)
 - [x] Database
-- [ ] Authentication
+- [x] Authentication (Bcrypt + JWT + Role Management)
 - [x] Document upload
 - [x] Document storage
 - [ ] AI analysis
@@ -188,8 +188,8 @@ IPFS may be considered later if time permits.
 - [x] Smart contract
 - [x] Blockchain integration
 - [x] Verification
-- [ ] Access control
-- [ ] Sharing
+- [x] Access control (RBAC: Lawyer, Judge, Client, Admin)
+- [x] Sharing (Document sharing & permission management)
 - [ ] Version history
 - [ ] AI comparison
 - [ ] Documentation

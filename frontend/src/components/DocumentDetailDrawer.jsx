@@ -1,41 +1,52 @@
-import React, { useState, useEffect } from 'react';
-import { fetchDocumentDetail, getDocumentDownloadUrl } from '../services/api';
+import React, { useState, useEffect, useCallback } from 'react';
+import { fetchDocumentDetail, downloadDocumentFile, fetchDocumentShares, revokeDocumentShare } from '../services/api';
+import { useAuth } from '../context/AuthContext';
 
-export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVerify }) {
+export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVerify, onOpenShare }) {
+  const { user, isAdmin } = useAuth();
   const [doc, setDoc] = useState(null);
+  const [shares, setShares] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [copiedField, setCopiedField] = useState(null);
+  const [revokingShareId, setRevokingShareId] = useState(null);
+  const [isDownloading, setIsDownloading] = useState(false);
 
-  useEffect(() => {
-    if (!isOpen || !documentId) {
-      setDoc(null);
-      setError(null);
-      return;
-    }
-
-    let isMounted = true;
+  const loadDetail = useCallback(async () => {
+    if (!documentId) return;
     setLoading(true);
     setError(null);
+    try {
+      const data = await fetchDocumentDetail(documentId);
+      setDoc(data);
 
-    fetchDocumentDetail(documentId)
-      .then((data) => {
-        if (isMounted) {
-          setDoc(data);
-          setLoading(false);
+      // If owner or admin, load active shares
+      if (data.is_owner || isAdmin) {
+        try {
+          const activeShares = await fetchDocumentShares(documentId);
+          setShares(activeShares);
+        } catch {
+          setShares([]);
         }
-      })
-      .catch((err) => {
-        if (isMounted) {
-          setError(err.message || 'Failed to load document details.');
-          setLoading(false);
-        }
-      });
+      } else {
+        setShares([]);
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to load document details.');
+    } finally {
+      setLoading(false);
+    }
+  }, [documentId, isAdmin]);
 
-    return () => {
-      isMounted = false;
-    };
-  }, [isOpen, documentId]);
+  useEffect(() => {
+    if (isOpen && documentId) {
+      loadDetail();
+    } else {
+      setDoc(null);
+      setShares([]);
+      setError(null);
+    }
+  }, [isOpen, documentId, loadDetail]);
 
   if (!isOpen) return null;
 
@@ -44,6 +55,31 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
     navigator.clipboard.writeText(text);
     setCopiedField(fieldName);
     setTimeout(() => setCopiedField(null), 2000);
+  };
+
+  const handleRevoke = async (shareId) => {
+    if (!documentId) return;
+    setRevokingShareId(shareId);
+    try {
+      await revokeDocumentShare(documentId, shareId);
+      setShares((prev) => prev.filter((s) => s.id !== shareId));
+    } catch (err) {
+      alert(err.message || 'Failed to revoke share');
+    } finally {
+      setRevokingShareId(null);
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!doc) return;
+    setIsDownloading(true);
+    try {
+      await downloadDocumentFile(doc.id, doc.filename);
+    } catch (err) {
+      alert(err.message || 'Download failed');
+    } finally {
+      setIsDownloading(false);
+    }
   };
 
   const formatDate = (isoString) => {
@@ -68,9 +104,11 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
     }
   };
 
+  const canManageSharing = doc?.is_owner || isAdmin;
+
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-dialog" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-dialog modal-lg" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <div className="modal-header-meta">
             <span className="modal-pretitle">Evault Docket Inspection</span>
@@ -92,17 +130,29 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
             </div>
           ) : doc ? (
             <div>
-              <div style={{ marginBottom: '1.25rem' }}>
-                <h3 className="serif-heading" style={{ fontSize: '1.25rem', marginBottom: '0.25rem' }}>
-                  {doc.filename}
-                </h3>
-                <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-                  <span className="case-id-cell">Case: {doc.case_number || 'UNASSIGNED'}</span>
-                  <span style={{ color: 'var(--border-strong)' }}>|</span>
-                  <span style={{ fontSize: '0.8rem', color: 'var(--ink-muted)' }}>
-                    Deposited: {formatDate(doc.created_at)}
-                  </span>
+              <div style={{ marginBottom: '1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div>
+                  <h3 className="serif-heading" style={{ fontSize: '1.25rem', marginBottom: '0.25rem' }}>
+                    {doc.filename}
+                  </h3>
+                  <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                    <span className="case-id-cell">Case: {doc.case_number || 'UNASSIGNED'}</span>
+                    <span style={{ color: 'var(--border-strong)' }}>|</span>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--ink-muted)' }}>
+                      Deposited: {formatDate(doc.created_at)}
+                    </span>
+                  </div>
                 </div>
+
+                {canManageSharing && onOpenShare && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => onOpenShare(doc)}
+                  >
+                    + Share Legal Record
+                  </button>
+                )}
               </div>
 
               <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '1rem', marginBottom: '1.25rem' }}>
@@ -187,14 +237,72 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
                 </tbody>
               </table>
 
+              {/* Active Judicial & Client Shares Section (Owner / Admin only) */}
+              {canManageSharing && (
+                <div style={{ marginTop: '1.5rem', paddingTop: '1.25rem', borderTop: '1px solid var(--border-color)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.65rem' }}>
+                    <div className="serif-heading" style={{ fontSize: '0.98rem' }}>
+                      Active Judicial &amp; Client Access ({shares.length})
+                    </div>
+                  </div>
+
+                  {shares.length === 0 ? (
+                    <div style={{ fontSize: '0.8rem', color: 'var(--ink-muted)', padding: '0.75rem', backgroundColor: 'var(--bg-subtle)', borderRadius: 'var(--radius-xs)' }}>
+                      This document is currently confidential and has not been shared with any Judge or Client accounts.
+                    </div>
+                  ) : (
+                    <table className="docket-table" style={{ fontSize: '0.8rem' }}>
+                      <thead>
+                        <tr>
+                          <th>Recipient</th>
+                          <th>Role</th>
+                          <th>Shared On</th>
+                          <th style={{ textAlign: 'right' }}>Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {shares.map((s) => (
+                          <tr key={s.id}>
+                            <td>
+                              <div style={{ fontWeight: 600, color: 'var(--ink-primary)' }}>{s.shared_with_name}</div>
+                              <div style={{ fontSize: '0.72rem', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}>{s.shared_with_email}</div>
+                            </td>
+                            <td>
+                              <span className="badge" style={{ fontSize: '0.68rem', padding: '0.1rem 0.4rem', backgroundColor: 'var(--bg-subtle)' }}>
+                                {s.shared_with_role}
+                              </span>
+                            </td>
+                            <td style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
+                              {formatDate(s.created_at)}
+                            </td>
+                            <td style={{ textAlign: 'right' }}>
+                              <button
+                                type="button"
+                                className="btn btn-danger btn-sm"
+                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem' }}
+                                onClick={() => handleRevoke(s.id)}
+                                disabled={revokingShareId === s.id}
+                              >
+                                {revokingShareId === s.id ? 'Revoking...' : 'Revoke'}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              )}
+
               <div style={{ marginTop: '1.75rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <a
-                  href={getDocumentDownloadUrl(doc.id)}
-                  download={doc.filename}
+                <button
+                  type="button"
                   className="btn btn-secondary btn-sm"
+                  onClick={handleDownload}
+                  disabled={isDownloading}
                 >
-                  Download Original File
-                </a>
+                  {isDownloading ? 'Downloading...' : 'Download Original File'}
+                </button>
 
                 <div style={{ display: 'flex', gap: '0.75rem' }}>
                   <button
