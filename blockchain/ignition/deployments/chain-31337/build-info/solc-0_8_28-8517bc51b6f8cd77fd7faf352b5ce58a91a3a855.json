@@ -1,0 +1,49 @@
+{
+  "_format": "hh3-sol-build-info-1",
+  "id": "solc-0_8_28-8517bc51b6f8cd77fd7faf352b5ce58a91a3a855",
+  "solcVersion": "0.8.28",
+  "solcLongVersion": "0.8.28+commit.7893614a",
+  "compilerType": "solc",
+  "toolVersions": {
+    "hardhat": "3.13.0"
+  },
+  "userSourceNameMap": {
+    "contracts/LegalVault.sol": "project/contracts/LegalVault.sol"
+  },
+  "input": {
+    "language": "Solidity",
+    "settings": {
+      "evmVersion": "cancun",
+      "optimizer": {
+        "enabled": true,
+        "runs": 200
+      },
+      "outputSelection": {
+        "*": {
+          "": [
+            "ast"
+          ],
+          "*": [
+            "abi",
+            "evm.bytecode.linkReferences",
+            "evm.bytecode.object",
+            "evm.bytecode.opcodes",
+            "evm.bytecode.sourceMap",
+            "evm.deployedBytecode.immutableReferences",
+            "evm.deployedBytecode.linkReferences",
+            "evm.deployedBytecode.object",
+            "evm.deployedBytecode.opcodes",
+            "evm.deployedBytecode.sourceMap",
+            "evm.methodIdentifiers"
+          ]
+        }
+      },
+      "remappings": []
+    },
+    "sources": {
+      "project/contracts/LegalVault.sol": {
+        "content": "// SPDX-License-Identifier: MIT\r\npragma solidity ^0.8.24;\r\n\r\ncontract LegalVault {\r\n\r\n    struct Document {\r\n        string documentId;\r\n        string documentHash;\r\n        address owner;\r\n        uint256 timestamp;\r\n        uint256 version;\r\n    }\r\n\r\n    mapping(string => Document) private documents;\r\n\r\n    function registerDocument(\r\n        string memory _documentId,\r\n        string memory _documentHash,\r\n        uint256 _version\r\n    ) public {\r\n        documents[_documentId] = Document(\r\n            _documentId,\r\n            _documentHash,\r\n            msg.sender,\r\n            block.timestamp,\r\n            _version\r\n        );\r\n    }\r\n\r\n    function getDocument(\r\n        string memory _documentId\r\n    ) public view returns (\r\n        string memory,\r\n        string memory,\r\n        address,\r\n        uint256,\r\n        uint256\r\n    ) {\r\n        Document memory doc = documents[_documentId];\r\n\r\n        return (\r\n            doc.documentId,\r\n            doc.documentHash,\r\n            doc.owner,\r\n            doc.timestamp,\r\n            doc.version\r\n        );\r\n    }\r\n}"
+      }
+    }
+  }
+}

@@ -13,4 +13,6 @@ class Document(Base):
     uploaded_by = Column(String, nullable=False)
     file_hash = Column(String, nullable=True)
     version = Column(Integer, default=1)
+    blockchain_tx_hash = Column(String, nullable=True)
+    blockchain_status = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

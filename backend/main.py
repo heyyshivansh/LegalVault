@@ -4,10 +4,12 @@ import shutil
 import os
 import hashlib
 
-from database import engine, Base, SessionLocal
+from database import engine, Base, SessionLocal, migrate_schema
 from models import Document
+from blockchain import register_document_on_chain
 
 Base.metadata.create_all(bind=engine)
+migrate_schema()
 
 app = FastAPI(title="LegalVault API")
 
@@ -56,9 +58,30 @@ def upload_document(
     db.commit()
     db.refresh(document)
 
+    blockchain_tx_hash = None
+    blockchain_status = "failed"
+
+    try:
+        chain_result = register_document_on_chain(
+            document_id=str(document.id),
+            document_hash=file_hash,
+            version=document.version,
+        )
+        blockchain_tx_hash = chain_result["blockchain_tx_hash"]
+        blockchain_status = chain_result["blockchain_status"]
+    except Exception:
+        blockchain_status = "failed"
+
+    document.blockchain_tx_hash = blockchain_tx_hash
+    document.blockchain_status = blockchain_status
+    db.commit()
+    db.refresh(document)
+
     return {
         "message": "Document uploaded successfully",
         "document_id": document.id,
         "filename": document.filename,
-        "file_hash": file_hash
+        "file_hash": file_hash,
+        "blockchain_tx_hash": document.blockchain_tx_hash,
+        "blockchain_status": document.blockchain_status,
     }
