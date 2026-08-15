@@ -81,3 +81,24 @@ def register_document_on_chain(document_id: str, document_hash: str, version: in
         "blockchain_tx_hash": tx_hash.hex(),
         "blockchain_status": status,
     }
+
+
+def get_document_from_chain(document_id: str) -> dict:
+    w3 = Web3(Web3.HTTPProvider(RPC_URL))
+    if not w3.is_connected():
+        raise ConnectionError(f"Unable to connect to Ethereum node at {RPC_URL}")
+
+    contract = w3.eth.contract(
+        address=Web3.to_checksum_address(CONTRACT_ADDRESS),
+        abi=LEGAL_VAULT_ABI,
+    )
+
+    doc_data = contract.functions.getDocument(str(document_id)).call()
+    return {
+        "document_id": doc_data[0],
+        "document_hash": doc_data[1],
+        "owner": doc_data[2],
+        "timestamp": doc_data[3],
+        "version": doc_data[4],
+    }
+

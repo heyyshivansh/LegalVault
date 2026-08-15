@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, Depends
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.orm import Session
 import shutil
 import os
@@ -6,7 +6,7 @@ import hashlib
 
 from database import engine, Base, SessionLocal, migrate_schema
 from models import Document
-from blockchain import register_document_on_chain
+from blockchain import register_document_on_chain, get_document_from_chain
 
 Base.metadata.create_all(bind=engine)
 migrate_schema()
@@ -85,3 +85,56 @@ def upload_document(
         "blockchain_tx_hash": document.blockchain_tx_hash,
         "blockchain_status": document.blockchain_status,
     }
+
+
+@app.post("/documents/{document_id}/verify")
+def verify_document(document_id: int, db: Session = Depends(get_db)):
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    file_path = os.path.join(UPLOAD_DIR, document.filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Stored document file '{document.filename}' not found on disk",
+        )
+
+    with open(file_path, "rb") as f:
+        current_hash = hashlib.sha256(f.read()).hexdigest()
+
+    try:
+        onchain_data = get_document_from_chain(str(document.id))
+    except ConnectionError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Blockchain service unavailable: {str(e)}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to retrieve document from blockchain: {str(e)}",
+        )
+
+    blockchain_hash = onchain_data.get("document_hash")
+    if not blockchain_hash:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Document ID {document_id} is not registered on the blockchain",
+        )
+
+    is_verified = (current_hash.lower() == blockchain_hash.lower())
+    result_text = "VERIFIED" if is_verified else "TAMPERED"
+
+    return {
+        "document_id": document.id,
+        "filename": document.filename,
+        "current_hash": current_hash,
+        "blockchain_hash": blockchain_hash,
+        "blockchain_status": document.blockchain_status,
+        "verified": is_verified,
+        "result": result_text,
+    }
