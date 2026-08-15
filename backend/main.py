@@ -1,4 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 import shutil
 import os
@@ -6,12 +8,20 @@ import hashlib
 
 from database import engine, Base, SessionLocal, migrate_schema
 from models import Document
-from blockchain import register_document_on_chain, get_document_from_chain
+from blockchain import register_document_on_chain, get_document_from_chain, CONTRACT_ADDRESS
 
 Base.metadata.create_all(bind=engine)
 migrate_schema()
 
 app = FastAPI(title="LegalVault API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -30,6 +40,78 @@ def home():
     return {
         "message": "LegalVault API is running"
     }
+
+
+@app.get("/documents")
+def list_documents(db: Session = Depends(get_db)):
+    documents = db.query(Document).order_by(Document.created_at.desc()).all()
+    return [
+        {
+            "id": doc.id,
+            "filename": doc.filename,
+            "case_number": doc.case_number,
+            "uploaded_by": doc.uploaded_by,
+            "file_hash": doc.file_hash,
+            "version": doc.version,
+            "blockchain_tx_hash": doc.blockchain_tx_hash,
+            "blockchain_status": doc.blockchain_status,
+            "created_at": doc.created_at.isoformat() if doc.created_at else None,
+        }
+        for doc in documents
+    ]
+
+
+@app.get("/documents/{document_id}")
+def get_document_detail(document_id: int, db: Session = Depends(get_db)):
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    onchain_data = None
+    try:
+        onchain_data = get_document_from_chain(str(document.id))
+    except Exception:
+        pass
+
+    return {
+        "id": document.id,
+        "filename": document.filename,
+        "case_number": document.case_number,
+        "uploaded_by": document.uploaded_by,
+        "file_hash": document.file_hash,
+        "version": document.version,
+        "blockchain_tx_hash": document.blockchain_tx_hash,
+        "blockchain_status": document.blockchain_status,
+        "created_at": document.created_at.isoformat() if document.created_at else None,
+        "onchain": onchain_data,
+        "contract_address": CONTRACT_ADDRESS,
+    }
+
+
+@app.get("/documents/{document_id}/download")
+def download_document(document_id: int, db: Session = Depends(get_db)):
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    file_path = os.path.join(UPLOAD_DIR, document.filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Stored document file '{document.filename}' not found on disk",
+        )
+
+    return FileResponse(
+        path=file_path,
+        filename=document.filename,
+        media_type="application/octet-stream",
+    )
 
 
 @app.post("/documents/upload")
@@ -132,9 +214,16 @@ def verify_document(document_id: int, db: Session = Depends(get_db)):
     return {
         "document_id": document.id,
         "filename": document.filename,
+        "case_number": document.case_number,
+        "uploaded_by": document.uploaded_by,
         "current_hash": current_hash,
         "blockchain_hash": blockchain_hash,
         "blockchain_status": document.blockchain_status,
         "verified": is_verified,
         "result": result_text,
+        "blockchain_tx_hash": document.blockchain_tx_hash,
+        "contract_address": CONTRACT_ADDRESS,
+        "owner": onchain_data.get("owner"),
+        "timestamp": onchain_data.get("timestamp"),
+        "version": onchain_data.get("version"),
     }
