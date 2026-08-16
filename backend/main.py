@@ -73,6 +73,16 @@ class ShareableUserResponse(BaseModel):
     role: str
 
 
+class ResetVaultResponse(BaseModel):
+    message: str
+    documents_deleted: int
+    shares_deleted: int
+    files_deleted: int
+
+
+LEGALVAULT_ENV = os.getenv("LEGALVAULT_ENV", "development").strip().lower()
+
+
 # --- Access Control Helpers ---
 
 def check_document_ownership(document: Document, user: User) -> bool:
@@ -629,4 +639,56 @@ def revoke_document_share(
         "message": "Share revoked successfully",
         "share_id": share_id,
         "document_id": document_id,
+    }
+
+
+# --- Admin Development Utilities ---
+
+@app.post("/admin/dev/reset-vault", response_model=ResetVaultResponse)
+def dev_reset_vault(
+    current_user: User = Depends(require_roles(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """
+    Development-only vault reset endpoint:
+    - Strictly preserves the users table and seeded accounts
+    - Deletes all document_shares records
+    - Deletes all document records
+    - Deletes all uploaded files in backend/uploads while preserving directory
+    - Rejects execution if LEGALVAULT_ENV is set to production
+    """
+    current_env = os.getenv("LEGALVAULT_ENV", "development").strip().lower()
+    if current_env == "production":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Development vault reset is strictly forbidden when LEGALVAULT_ENV is set to production.",
+        )
+
+    # 1. Delete document shares first (maintains foreign key integrity)
+    shares_count = db.query(DocumentShare).count()
+    db.query(DocumentShare).delete()
+
+    # 2. Delete all documents
+    docs_count = db.query(Document).count()
+    db.query(Document).delete()
+
+    db.commit()
+
+    # 3. Delete all files in uploads directory while preserving the folder
+    files_deleted = 0
+    if os.path.exists(UPLOAD_DIR):
+        for filename in os.listdir(UPLOAD_DIR):
+            file_path = os.path.join(UPLOAD_DIR, filename)
+            if os.path.isfile(file_path):
+                try:
+                    os.remove(file_path)
+                    files_deleted += 1
+                except Exception:
+                    pass
+
+    return {
+        "message": "Development vault reset successfully. All documents, shares, and off-chain files have been cleared while preserving users.",
+        "documents_deleted": docs_count,
+        "shares_deleted": shares_count,
+        "files_deleted": files_deleted,
     }

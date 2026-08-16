@@ -213,3 +213,19 @@ export async function revokeDocumentShare(documentId, shareId) {
 
   return await res.json();
 }
+
+export async function resetDevelopmentVault() {
+  const res = await fetch(`${API_BASE}/admin/dev/reset-vault`, {
+    method: 'POST',
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to reset development vault (${res.status})`);
+  }
+
+  return await res.json();
+}

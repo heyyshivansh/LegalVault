@@ -20,9 +20,16 @@ def run_tests():
     token = auth_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
-    # --- TEST CASE A: ORIGINAL UNTAMPERED DOCUMENT (ID 7) ---
-    print("\n[TEST CASE A] Original Document Verification (ID 7)...")
-    resp_a = requests.post(f"{BASE_URL}/documents/7/verify", headers=headers)
+    # --- TEST CASE A: ORIGINAL UNTAMPERED DOCUMENT ---
+    print("\n[TEST CASE A] Original Document Verification...")
+    pdf_orig_bytes = b"%PDF-1.4 1 0 obj << /Type /Catalog >> endobj trailer << /Size 1 >> %%EOF"
+    files_a = {"file": ("original_verification_doc.pdf", pdf_orig_bytes, "application/pdf")}
+    data_a = {"case_number": "CASE-VERIFY-TEST-001", "uploaded_by": "Advocate Rajesh Sharma"}
+    upload_a = requests.post(f"{BASE_URL}/documents/upload", files=files_a, data=data_a, headers=headers)
+    assert upload_a.status_code == 200, f"Upload failed: {upload_a.text}"
+    doc_a_id = upload_a.json()["document_id"]
+
+    resp_a = requests.post(f"{BASE_URL}/documents/{doc_a_id}/verify", headers=headers)
     print("HTTP Status:", resp_a.status_code)
     data_a = resp_a.json()
     print("Payload:", json.dumps(data_a, indent=2))
@@ -37,10 +44,10 @@ def run_tests():
     print("\n[TEST CASE B] Tamper Detection Test...")
     # 1. Upload a separate test document
     pdf_tamper_orig = b"%PDF-1.4 1 0 obj << /Type /Catalog >> endobj trailer << /Size 1 >> %%EOF"
-    files = {"file": ("tamper_fixture_doc.pdf", pdf_tamper_orig, "application/pdf")}
-    data = {"case_number": "CASE-TAMPER-TEST-002", "uploaded_by": "Tester"}
+    files_b = {"file": ("tamper_fixture_doc.pdf", pdf_tamper_orig, "application/pdf")}
+    data_b = {"case_number": "CASE-TAMPER-TEST-002", "uploaded_by": "Tester"}
 
-    upload_resp = requests.post(f"{BASE_URL}/documents/upload", files=files, data=data, headers=headers)
+    upload_resp = requests.post(f"{BASE_URL}/documents/upload", files=files_b, data=data_b, headers=headers)
     assert upload_resp.status_code == 200
     upload_json = upload_resp.json()
     tamper_doc_id = upload_json["document_id"]
@@ -90,13 +97,16 @@ def run_tests():
     assert "not found on disk" in resp_d.json()["detail"]
     print(">>> TEST CASE D PASSED (404 Missing file on disk)!")
 
-    # Clean up temporary test row from SQLite so no orphaned row remains
+    # Clean up temporary test rows from SQLite and disk so test is idempotent
     try:
         db_path = os.path.join(os.path.dirname(__file__), "legalvault.db")
         conn = sqlite3.connect(db_path)
-        conn.execute("DELETE FROM documents WHERE id = ?", (tamper_doc_id,))
+        conn.execute("DELETE FROM documents WHERE id IN (?, ?)", (doc_a_id, tamper_doc_id))
         conn.commit()
         conn.close()
+        orig_file = os.path.join(os.path.dirname(__file__), "uploads", "original_verification_doc.pdf")
+        if os.path.exists(orig_file):
+            os.remove(orig_file)
     except Exception as e:
         print("Note: cleanup exception:", e)
 

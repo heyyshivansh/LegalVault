@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 export default function DocumentList({
   documents = [],
   isLoading,
+  integrityResults = {},
   onVerifyDocument,
   onInspectDocument,
 }) {
@@ -116,25 +117,26 @@ export default function DocumentList({
         <table className="docket-table">
           <thead>
             <tr>
-              <th style={{ width: '70px' }}>ID</th>
-              <th style={{ width: '160px' }}>Case Reference</th>
+              <th style={{ width: '65px' }}>ID</th>
+              <th style={{ width: '150px' }}>Case Reference</th>
               <th>Document Title &amp; SHA-256 Hash</th>
-              <th style={{ width: '160px' }}>Depositor / Counsel</th>
-              <th style={{ width: '160px' }}>Registration Date</th>
-              <th style={{ width: '130px' }}>Blockchain</th>
+              <th style={{ width: '150px' }}>Depositor / Counsel</th>
+              <th style={{ width: '150px' }}>Registration Date</th>
+              <th style={{ width: '120px' }}>Blockchain Anchor</th>
+              <th style={{ width: '135px' }}>Integrity Status</th>
               <th style={{ width: '220px', textAlign: 'right' }}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
               <tr>
-                <td colSpan={7} style={{ textAlign: 'center', padding: '3rem 1rem', color: 'var(--ink-muted)' }}>
+                <td colSpan={8} style={{ textAlign: 'center', padding: '3rem 1rem', color: 'var(--ink-muted)' }}>
                   Loading legal records from repository...
                 </td>
               </tr>
             ) : filteredDocs.length === 0 ? (
               <tr>
-                <td colSpan={7} style={{ textAlign: 'center', padding: '3rem 1.5rem', color: 'var(--ink-muted)' }}>
+                <td colSpan={8} style={{ textAlign: 'center', padding: '3rem 1.5rem', color: 'var(--ink-muted)' }}>
                   <div style={{ maxWidth: '480px', margin: '0 auto' }}>
                     <div style={{ fontWeight: 600, color: 'var(--ink-primary)', marginBottom: '0.35rem', fontSize: '0.92rem' }}>
                       {searchTerm ? 'No Matching Records' : 'No Records Available'}
@@ -146,84 +148,124 @@ export default function DocumentList({
                 </td>
               </tr>
             ) : (
-              filteredDocs.map((doc) => (
-                <tr key={doc.id}>
-                  <td className="case-id-cell">#{doc.id}</td>
-                  <td className="case-id-cell">
-                    {doc.case_number || <span style={{ color: 'var(--ink-subdued)' }}>UNASSIGNED</span>}
-                  </td>
-                  <td>
-                    <div className="doc-name-cell">
-                      <span className="doc-name-primary">{doc.filename}</span>
-                      <span className="doc-hash-snippet" title={doc.file_hash}>
-                        SHA256: {truncateHash(doc.file_hash)}
-                      </span>
-                    </div>
-                  </td>
-                  <td>
-                    <div style={{ color: 'var(--ink-secondary)', fontSize: '0.82rem' }}>
-                      {doc.uploaded_by || 'Unknown'}
-                    </div>
-                    {doc.is_shared && (
-                      <span className="badge" style={{ fontSize: '0.65rem', padding: '0.05rem 0.35rem', marginTop: '0.2rem', backgroundColor: '#EFF6FF', color: '#1E40AF', border: '1px solid #BFDBFE' }}>
-                        Shared with You
-                      </span>
-                    )}
-                  </td>
-                  <td style={{ color: 'var(--ink-muted)', fontSize: '0.78rem', fontFamily: 'var(--font-mono)' }}>
-                    {formatDate(doc.created_at)}
-                  </td>
-                  <td>
-                    {doc.blockchain_status === 'confirmed' ? (
-                      <span className="badge badge-confirmed" title={doc.blockchain_tx_hash || ''}>
-                        ● Anchored
-                      </span>
-                    ) : doc.blockchain_status === 'failed' ? (
-                      <span className="badge badge-failed">
-                        ● Failed
-                      </span>
-                    ) : (
-                      <span className="badge badge-pending">
-                        ● Pending
-                      </span>
-                    )}
-                  </td>
-                  <td style={{ textAlign: 'right' }}>
-                    <div style={{ display: 'inline-flex', gap: '0.4rem', justifyContent: 'flex-end' }}>
-                      <button
-                        type="button"
-                        className="btn btn-primary btn-sm"
-                        style={{ fontSize: '0.75rem', padding: '0.3rem 0.55rem' }}
-                        onClick={() => onVerifyDocument(doc.id)}
-                        title="Run real-time cryptographic integrity check against Ethereum smart contract"
-                      >
-                        Verify Integrity
-                      </button>
+              filteredDocs.map((doc) => {
+                const integrity = integrityResults[doc.id];
+                return (
+                  <tr key={doc.id}>
+                    <td className="case-id-cell">#{doc.id}</td>
+                    <td className="case-id-cell">
+                      {doc.case_number || <span style={{ color: 'var(--ink-subdued)' }}>UNASSIGNED</span>}
+                    </td>
+                    <td>
+                      <div className="doc-name-cell">
+                        <span className="doc-name-primary">{doc.filename}</span>
+                        <span className="doc-hash-snippet" title={doc.file_hash}>
+                          SHA256: {truncateHash(doc.file_hash)}
+                        </span>
+                      </div>
+                    </td>
+                    <td>
+                      <div style={{ color: 'var(--ink-secondary)', fontSize: '0.82rem' }}>
+                        {doc.uploaded_by || 'Unknown'}
+                      </div>
+                      {doc.is_shared && (
+                        <span className="badge" style={{ fontSize: '0.65rem', padding: '0.05rem 0.35rem', marginTop: '0.2rem', backgroundColor: '#EFF6FF', color: '#1E40AF', border: '1px solid #BFDBFE' }}>
+                          Shared with You
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ color: 'var(--ink-muted)', fontSize: '0.78rem', fontFamily: 'var(--font-mono)' }}>
+                      {formatDate(doc.created_at)}
+                    </td>
+                    <td>
+                      {doc.blockchain_status === 'confirmed' ? (
+                        <span className="badge badge-confirmed" title={doc.blockchain_tx_hash || ''}>
+                          ● Anchored
+                        </span>
+                      ) : doc.blockchain_status === 'failed' ? (
+                        <span className="badge badge-failed">
+                          ● Failed
+                        </span>
+                      ) : (
+                        <span className="badge badge-pending">
+                          ● Pending
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      {integrity ? (
+                        integrity.result === 'VERIFIED' ? (
+                          <span
+                            className="badge"
+                            style={{
+                              backgroundColor: '#ECFDF5',
+                              color: '#047857',
+                              border: '1px solid #A7F3D0',
+                              fontWeight: 600,
+                              fontSize: '0.72rem',
+                            }}
+                            title="Cryptographic verification confirmed on-disk hash matches blockchain ledger"
+                          >
+                            ✓ VERIFIED
+                          </span>
+                        ) : (
+                          <span
+                            className="badge"
+                            style={{
+                              backgroundColor: '#FEF2F2',
+                              color: '#B91C1C',
+                              border: '1px solid #FECACA',
+                              fontWeight: 700,
+                              fontSize: '0.72rem',
+                            }}
+                            title="WARNING: On-disk file hash differs from canonical on-chain registration"
+                          >
+                            ⚠ TAMPERED
+                          </span>
+                        )
+                      ) : (
+                        <span style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
+                          Unverified
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ textAlign: 'right' }}>
+                      <div style={{ display: 'inline-flex', gap: '0.4rem', justifyContent: 'flex-end' }}>
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-sm"
+                          style={{ fontSize: '0.75rem', padding: '0.3rem 0.55rem' }}
+                          onClick={() => onVerifyDocument(doc.id)}
+                          title="Run real-time cryptographic integrity check against Ethereum smart contract"
+                        >
+                          Verify Integrity
+                        </button>
 
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        style={{ fontSize: '0.75rem', padding: '0.3rem 0.55rem' }}
-                        onClick={() => onInspectDocument(doc.id)}
-                        title="View complete record details, shares, and provenance"
-                      >
-                        Inspect
-                      </button>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          style={{ fontSize: '0.75rem', padding: '0.3rem 0.55rem' }}
+                          onClick={() => onInspectDocument(doc.id)}
+                          title="View complete record details, shares, and provenance"
+                        >
+                          Inspect
+                        </button>
 
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-sm"
-                        style={{ fontSize: '0.75rem', padding: '0.3rem 0.55rem' }}
-                        onClick={() => handleDownload(doc.id, doc.filename)}
-                        disabled={downloadingDocId === doc.id}
-                        title="Download stored original file"
-                      >
-                        {downloadingDocId === doc.id ? 'Downloading...' : 'Download'}
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          style={{ fontSize: '0.75rem', padding: '0.3rem 0.55rem' }}
+                          onClick={() => handleDownload(doc.id, doc.filename)}
+                          disabled={downloadingDocId === doc.id}
+                          title="Download stored original file"
+                        >
+                          {downloadingDocId === doc.id ? 'Downloading...' : 'Download'}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>

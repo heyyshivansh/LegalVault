@@ -6,6 +6,7 @@ import DocumentUploadModal from './components/DocumentUploadModal';
 import VerificationModal from './components/VerificationModal';
 import DocumentDetailDrawer from './components/DocumentDetailDrawer';
 import ShareDocumentModal from './components/ShareDocumentModal';
+import AdminResetModal from './components/AdminResetModal';
 import LoginView from './components/LoginView';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { checkApiHealth, fetchDocuments } from './services/api';
@@ -17,11 +18,15 @@ function VaultWorkspace() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Dynamic live integrity verification state: { [docId]: { verified: bool, result: 'VERIFIED' | 'TAMPERED', timestamp } }
+  const [integrityResults, setIntegrityResults] = useState({});
+
   // Modals state
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [verifyingDocId, setVerifyingDocId] = useState(null);
   const [inspectingDocId, setInspectingDocId] = useState(null);
   const [sharingDoc, setSharingDoc] = useState(null);
+  const [isResetOpen, setIsResetOpen] = useState(false);
 
   const loadData = useCallback(async () => {
     if (!isAuthenticated) return;
@@ -58,6 +63,18 @@ function VaultWorkspace() {
   };
 
   const handleShareSuccess = () => {
+    loadData();
+  };
+
+  const handleVerificationComplete = (docId, result) => {
+    setIntegrityResults((prev) => ({
+      ...prev,
+      [docId]: result,
+    }));
+  };
+
+  const handleResetSuccess = () => {
+    setIntegrityResults({});
     loadData();
   };
 
@@ -144,18 +161,32 @@ function VaultWorkspace() {
 
         {/* Administration Status Strip for Admin */}
         {isAdmin && (
-          <div style={{ backgroundColor: '#FEFCE8', border: '1px solid #FEF08A', padding: '0.75rem 1.25rem', borderRadius: 'var(--radius-sm)', marginBottom: '1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ backgroundColor: '#FEFCE8', border: '1px solid #FEF08A', padding: '0.85rem 1.25rem', borderRadius: 'var(--radius-sm)', marginBottom: '1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
             <div>
-              <span style={{ fontWeight: 700, fontSize: '0.78rem', color: '#854D0E', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                ADMINISTRATIVE OVERSIGHT ACTIVE
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <span style={{ fontWeight: 700, fontSize: '0.78rem', color: '#854D0E', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  ADMINISTRATIVE OVERSIGHT ACTIVE
+                </span>
+                <span className="badge" style={{ backgroundColor: '#FEF3C7', color: '#92400E', border: '1px solid #FDE68A', fontSize: '0.68rem' }}>
+                  MASTER ACCESS
+                </span>
+              </div>
               <div style={{ fontSize: '0.8rem', color: '#713F12', marginTop: '0.15rem' }}>
                 You have unrestricted access to all vault dockets, cryptographic proofs, active shares, and blockchain transactions.
               </div>
             </div>
-            <span className="badge" style={{ backgroundColor: '#FEF3C7', color: '#92400E', border: '1px solid #FDE68A' }}>
-              ALL RECORDS VISIBLE
-            </span>
+
+            <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
+              <button
+                type="button"
+                className="btn btn-danger btn-sm"
+                style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem' }}
+                onClick={() => setIsResetOpen(true)}
+                title="Reset development database documents, shares, and upload files while preserving users"
+              >
+                Reset Development Vault
+              </button>
+            </div>
           </div>
         )}
 
@@ -166,6 +197,7 @@ function VaultWorkspace() {
         <DocumentList
           documents={documents}
           isLoading={isLoading}
+          integrityResults={integrityResults}
           onVerifyDocument={(id) => setVerifyingDocId(id)}
           onInspectDocument={(id) => setInspectingDocId(id)}
         />
@@ -185,6 +217,7 @@ function VaultWorkspace() {
         documentId={verifyingDocId}
         isOpen={Boolean(verifyingDocId)}
         onClose={() => setVerifyingDocId(null)}
+        onVerificationComplete={handleVerificationComplete}
       />
 
       {/* Record Inspection Drawer */}
@@ -203,6 +236,15 @@ function VaultWorkspace() {
         onClose={() => setSharingDoc(null)}
         onShareSuccess={handleShareSuccess}
       />
+
+      {/* Admin Development Reset Modal */}
+      {isAdmin && (
+        <AdminResetModal
+          isOpen={isResetOpen}
+          onClose={() => setIsResetOpen(false)}
+          onResetSuccess={handleResetSuccess}
+        />
+      )}
     </div>
   );
 }

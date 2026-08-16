@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { verifyDocument, downloadDocumentFile } from '../services/api';
 
-export default function VerificationModal({ documentId, isOpen, onClose }) {
+export default function VerificationModal({ documentId, isOpen, onClose, onVerificationComplete }) {
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -24,6 +24,9 @@ export default function VerificationModal({ documentId, isOpen, onClose }) {
         if (isMounted) {
           setData(res);
           setLoading(false);
+          if (onVerificationComplete) {
+            onVerificationComplete(documentId, res);
+          }
         }
       })
       .catch((err) => {
