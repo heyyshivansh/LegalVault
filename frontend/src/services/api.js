@@ -482,4 +482,57 @@ export async function fetchDocumentMetadata(documentId) {
   return await res.json();
 }
 
+// --- AI Summarization API Endpoints ---
+
+export async function generateVersionSummary(documentId, versionIdentifier, force = false) {
+  const query = force ? '?force=true' : '';
+  const res = await fetch(`${API_BASE}/documents/${documentId}/versions/${versionIdentifier}/summary${query}`, {
+    method: 'POST',
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const errorMsg = typeof err.detail === 'string' ? err.detail : err.detail?.message || `AI summarization failed with status ${res.status}`;
+    const errorObj = new Error(errorMsg);
+    errorObj.status = res.status;
+    errorObj.data = err.detail || err;
+    throw errorObj;
+  }
+
+  return await res.json();
+}
+
+export async function fetchVersionSummary(documentId, versionIdentifier) {
+  const res = await fetch(`${API_BASE}/documents/${documentId}/versions/${versionIdentifier}/summary`, {
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to fetch summary for Version ${versionIdentifier}`);
+  }
+
+  return await res.json();
+}
+
+export async function fetchDocumentSummary(documentId) {
+  const res = await fetch(`${API_BASE}/documents/${documentId}/summary`, {
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to fetch summary for document #${documentId}`);
+  }
+
+  return await res.json();
+}
+
 

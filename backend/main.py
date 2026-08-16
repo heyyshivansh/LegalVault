@@ -13,7 +13,7 @@ load_dotenv()
 from sqlalchemy import func
 
 from database import engine, Base, SessionLocal, migrate_schema, seed_initial_users
-from models import Document, User, UserRole, DocumentShare, DocumentVersion, AuditLog, DocumentVersionMetadata
+from models import Document, User, UserRole, DocumentShare, DocumentVersion, AuditLog, DocumentVersionMetadata, DocumentVersionSummary
 from sqlalchemy.exc import IntegrityError
 from blockchain import (
     register_document_on_chain,
@@ -44,7 +44,9 @@ from ai_extractor import (
     AIParsingError,
     AIServiceError,
     DEFAULT_EMPTY_METADATA,
+    DEFAULT_EMPTY_SUMMARY,
     normalize_extracted_schema,
+    normalize_summary_schema,
 )
 
 Base.metadata.create_all(bind=engine)
@@ -349,6 +351,103 @@ def format_version_metadata_response(
         "error_message": meta.error_message,
         "created_at": format_utc_iso(meta.created_at),
         "updated_at": format_utc_iso(meta.updated_at),
+        "cached": cached,
+        "is_owner_or_admin": is_owner_or_admin,
+    }
+
+
+# --- AI Summarization Schemas & Helpers ---
+
+class DocumentVersionSummaryResponse(BaseModel):
+    id: int | None = None
+    document_id: int
+    version_id: int | None = None
+    version_number: int
+    source_hash: str | None = None
+    status: str  # NOT_GENERATED, COMPLETED, FAILED, EXTRACTION_UNAVAILABLE, EXTRACTION_LIMIT_EXCEEDED
+    summary: str | None = None
+    key_facts: list[str] = []
+    legal_issues: list[str] = []
+    important_points: list[str] = []
+    ai_provider: str | None = None
+    ai_model: str | None = None
+    generation_duration_ms: int | None = None
+    error_message: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    cached: bool = False
+    is_owner_or_admin: bool = False
+
+
+def format_version_summary_response(
+    summary_rec: DocumentVersionSummary | None,
+    document_id: int,
+    version_id: int | None,
+    version_number: int,
+    source_hash: str | None,
+    is_owner_or_admin: bool,
+    cached: bool = False,
+) -> dict:
+    if summary_rec is None:
+        return {
+            "id": None,
+            "document_id": document_id,
+            "version_id": version_id,
+            "version_number": version_number,
+            "source_hash": source_hash,
+            "status": "NOT_GENERATED",
+            "summary": None,
+            "key_facts": [],
+            "legal_issues": [],
+            "important_points": [],
+            "ai_provider": None,
+            "ai_model": None,
+            "generation_duration_ms": None,
+            "error_message": None,
+            "created_at": None,
+            "updated_at": None,
+            "cached": False,
+            "is_owner_or_admin": is_owner_or_admin,
+        }
+
+    key_facts = []
+    if summary_rec.key_facts_json:
+        try:
+            key_facts = json.loads(summary_rec.key_facts_json)
+        except Exception:
+            key_facts = []
+
+    legal_issues = []
+    if summary_rec.legal_issues_json:
+        try:
+            legal_issues = json.loads(summary_rec.legal_issues_json)
+        except Exception:
+            legal_issues = []
+
+    important_points = []
+    if summary_rec.important_points_json:
+        try:
+            important_points = json.loads(summary_rec.important_points_json)
+        except Exception:
+            important_points = []
+
+    return {
+        "id": summary_rec.id,
+        "document_id": summary_rec.document_id,
+        "version_id": summary_rec.version_id,
+        "version_number": summary_rec.version_number,
+        "source_hash": summary_rec.source_hash,
+        "status": summary_rec.status or "NOT_GENERATED",
+        "summary": summary_rec.summary,
+        "key_facts": key_facts,
+        "legal_issues": legal_issues,
+        "important_points": important_points,
+        "ai_provider": summary_rec.ai_provider,
+        "ai_model": summary_rec.ai_model,
+        "generation_duration_ms": summary_rec.generation_duration_ms,
+        "error_message": summary_rec.error_message,
+        "created_at": format_utc_iso(summary_rec.created_at),
+        "updated_at": format_utc_iso(summary_rec.updated_at),
         "cached": cached,
         "is_owner_or_admin": is_owner_or_admin,
     }
@@ -1878,6 +1977,320 @@ def get_document_master_metadata(
     )
 
 
+# --- AI Summarization & Query Endpoints ---
+
+@app.post("/documents/{document_id}/versions/{version_identifier}/summary", response_model=DocumentVersionSummaryResponse)
+def generate_document_version_summary(
+    document_id: int,
+    version_identifier: str,
+    force: bool = False,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Triggers or returns cached AI-assisted structured legal summarization for a specific document version.
+    - RBAC: Allowed only for Document Owner and Administrator.
+    - Shared Judges / Clients: Blocked with HTTP 403 (ACTION_DENIED).
+    - Caching: Returns cached COMPLETED summary instantly for the immutable version SHA-256 hash unless force=True.
+    - Fault Isolation: AI errors do not affect the underlying document, version, SHA-256, or blockchain state.
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    # 1. Access Check: Must have access to the document
+    if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to access document #{document_id}",
+            metadata={"attempted_action": "GENERATE_SUMMARY", "version_identifier": str(version_identifier)},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: You do not have permission to access document #{document_id}",
+        )
+
+    # 2. RBAC Guard: Only Owner or Admin can trigger summary generation
+    if not check_document_ownership(document, current_user):
+        log_audit_event(
+            action=AuditEventType.ACTION_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason="Access forbidden: Only the document owner or an administrator can trigger AI summarization.",
+            metadata={"attempted_action": "GENERATE_SUMMARY", "version_identifier": str(version_identifier)},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: Only the document owner or an administrator can trigger AI summarization.",
+        )
+
+    # 3. Locate exact DocumentVersion
+    version = find_document_version(document_id, version_identifier, db)
+    if not version:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Version '{version_identifier}' not found for document #{document_id}",
+        )
+
+    # 4. Check Cache (if force != True)
+    existing_summary = db.query(DocumentVersionSummary).filter(
+        DocumentVersionSummary.version_id == version.id
+    ).first()
+
+    if existing_summary and existing_summary.status == "COMPLETED" and existing_summary.source_hash == version.file_hash and not force:
+        return format_version_summary_response(
+            existing_summary,
+            document_id=document.id,
+            version_id=version.id,
+            version_number=version.version_number,
+            source_hash=version.file_hash,
+            is_owner_or_admin=True,
+            cached=True,
+        )
+
+    # 5. Resolve File Path on disk
+    file_path = get_version_file_path(version, document)
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Stored document version file '{version.filename}' (v{version.version_number}) not found on disk",
+        )
+
+    # 6. Instantiate Extractor / Summarizer (Strictly validates provider configuration)
+    try:
+        extractor = AIExtractor()
+    except AIConfigurationError as e:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.AI_SUMMARY_GENERATION_FAILED,
+            result=AuditResult.FAILED,
+            actor=current_user,
+            document=document,
+            version=version,
+            version_number=version.version_number,
+            reason=str(e),
+            metadata={"status": "FAILED", "provider": "gemini"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "AI_CONFIGURATION_ERROR",
+                "message": str(e),
+            },
+        )
+
+    # 7. Process summarization synchronously
+    hint = {
+        "filename": version.filename,
+        "case_number": document.case_number,
+    }
+    summary_dict, status_str, error_msg, duration_ms = extractor.generate_summary_for_file(
+        file_path=file_path,
+        file_type=version.file_type,
+        document_hint=hint,
+    )
+
+    # 8. Upsert DocumentVersionSummary record
+    if not existing_summary:
+        existing_summary = DocumentVersionSummary(
+            document_id=document.id,
+            version_id=version.id,
+            version_number=version.version_number,
+            source_hash=version.file_hash,
+            status=status_str,
+            ai_provider=extractor.provider_name,
+            ai_model=extractor.model_name,
+            generation_duration_ms=duration_ms,
+            error_message=error_msg,
+        )
+        db.add(existing_summary)
+    else:
+        existing_summary.status = status_str
+        existing_summary.source_hash = version.file_hash
+        existing_summary.ai_provider = extractor.provider_name
+        existing_summary.ai_model = extractor.model_name
+        existing_summary.generation_duration_ms = duration_ms
+        existing_summary.error_message = error_msg
+
+    if summary_dict:
+        existing_summary.summary = summary_dict.get("summary")
+        existing_summary.key_facts_json = json.dumps(summary_dict.get("key_facts", []))
+        existing_summary.legal_issues_json = json.dumps(summary_dict.get("legal_issues", []))
+        existing_summary.important_points_json = json.dumps(summary_dict.get("important_points", []))
+
+    db.commit()
+    db.refresh(existing_summary)
+
+    # 9. Audit Logging (Strictly sanitized, NO raw document text or prompt)
+    if status_str == "COMPLETED":
+        log_audit_event(
+            db=db,
+            action=AuditEventType.AI_SUMMARY_GENERATED,
+            result=AuditResult.SUCCESS,
+            actor=current_user,
+            document=document,
+            version=version,
+            version_number=version.version_number,
+            metadata={
+                "provider": extractor.provider_name,
+                "model": extractor.model_name,
+                "duration_ms": duration_ms,
+                "summary_length": len(existing_summary.summary or ""),
+                "key_facts_count": len(json.loads(existing_summary.key_facts_json or "[]")),
+                "legal_issues_count": len(json.loads(existing_summary.legal_issues_json or "[]")),
+                "important_points_count": len(json.loads(existing_summary.important_points_json or "[]")),
+                "cached": False,
+            },
+        )
+    else:
+        audit_res = AuditResult.UNAVAILABLE if status_str in ["EXTRACTION_UNAVAILABLE", "EXTRACTION_LIMIT_EXCEEDED"] else AuditResult.FAILED
+        log_audit_event(
+            db=db,
+            action=AuditEventType.AI_SUMMARY_GENERATION_FAILED,
+            result=audit_res,
+            actor=current_user,
+            document=document,
+            version=version,
+            version_number=version.version_number,
+            reason=error_msg,
+            metadata={
+                "provider": extractor.provider_name,
+                "model": extractor.model_name,
+                "duration_ms": duration_ms,
+                "status": status_str,
+            },
+        )
+
+    return format_version_summary_response(
+        existing_summary,
+        document_id=document.id,
+        version_id=version.id,
+        version_number=version.version_number,
+        source_hash=version.file_hash,
+        is_owner_or_admin=True,
+        cached=False,
+    )
+
+
+@app.get("/documents/{document_id}/versions/{version_identifier}/summary", response_model=DocumentVersionSummaryResponse)
+def get_document_version_summary(
+    document_id: int,
+    version_identifier: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Retrieves existing AI-generated summary for a specific document version."""
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to view summary for document #{document_id}",
+            metadata={"attempted_action": "GET_VERSION_SUMMARY", "version_identifier": str(version_identifier)},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: You do not have permission to view summary for document #{document_id}",
+        )
+
+    version = find_document_version(document_id, version_identifier, db)
+    if not version:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Version '{version_identifier}' not found for document #{document_id}",
+        )
+
+    is_owner_or_admin = check_document_ownership(document, current_user)
+    summary_rec = db.query(DocumentVersionSummary).filter(
+        DocumentVersionSummary.version_id == version.id
+    ).first()
+
+    return format_version_summary_response(
+        summary_rec,
+        document_id=document.id,
+        version_id=version.id,
+        version_number=version.version_number,
+        source_hash=version.file_hash,
+        is_owner_or_admin=is_owner_or_admin,
+        cached=False,
+    )
+
+
+@app.get("/documents/{document_id}/summary", response_model=DocumentVersionSummaryResponse)
+def get_document_master_summary(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Retrieves existing AI-generated summary for the current master version of a document."""
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to view summary for document #{document_id}",
+            metadata={"attempted_action": "GET_DOCUMENT_SUMMARY"},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: You do not have permission to view summary for document #{document_id}",
+        )
+
+    is_owner_or_admin = check_document_ownership(document, current_user)
+    version = find_document_version(document_id, document.version or 1, db)
+    if not version:
+        return format_version_summary_response(
+            None,
+            document_id=document.id,
+            version_id=None,
+            version_number=document.version or 1,
+            source_hash=document.file_hash,
+            is_owner_or_admin=is_owner_or_admin,
+            cached=False,
+        )
+
+    summary_rec = db.query(DocumentVersionSummary).filter(
+        DocumentVersionSummary.version_id == version.id
+    ).first()
+
+    return format_version_summary_response(
+        summary_rec,
+        document_id=document.id,
+        version_id=version.id,
+        version_number=version.version_number,
+        source_hash=version.file_hash,
+        is_owner_or_admin=is_owner_or_admin,
+        cached=False,
+    )
+
+
 @app.post("/documents/{document_id}/verify")
 def verify_document(
     document_id: int,
@@ -2274,7 +2687,9 @@ def dev_reset_vault(
             detail="Development vault reset is strictly forbidden when LEGALVAULT_ENV is set to production.",
         )
 
-    # 1. Delete document metadata, versions, and shares first (maintains foreign key integrity)
+    # 1. Delete document summaries, metadata, versions, and shares first (maintains foreign key integrity)
+    summaries_count = db.query(DocumentVersionSummary).count()
+    db.query(DocumentVersionSummary).delete()
     meta_count = db.query(DocumentVersionMetadata).count()
     db.query(DocumentVersionMetadata).delete()
     versions_count = db.query(DocumentVersion).count()
@@ -2316,6 +2731,7 @@ def dev_reset_vault(
             "versions_deleted": versions_count,
             "shares_deleted": shares_count,
             "metadata_deleted": meta_count,
+            "summaries_deleted": summaries_count,
             "files_deleted": files_deleted,
         },
     )

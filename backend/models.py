@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 
@@ -75,6 +75,7 @@ class DocumentVersion(Base):
 
     document = relationship("Document", back_populates="versions")
     ai_metadata = relationship("DocumentVersionMetadata", back_populates="version", uselist=False, cascade="all, delete-orphan")
+    ai_summary = relationship("DocumentVersionSummary", back_populates="version", uselist=False, cascade="all, delete-orphan")
 
 
 class DocumentVersionMetadata(Base):
@@ -111,6 +112,37 @@ class DocumentVersionMetadata(Base):
     )
 
     version = relationship("DocumentVersion", back_populates="ai_metadata")
+    document = relationship("Document")
+
+
+class DocumentVersionSummary(Base):
+    __tablename__ = "document_version_summaries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_id = Column(Integer, ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    version_number = Column(Integer, nullable=False)
+    source_hash = Column(String, nullable=False, index=True)
+
+    status = Column(String, nullable=False, default="NOT_GENERATED")  # NOT_GENERATED, COMPLETED, FAILED, EXTRACTION_UNAVAILABLE, EXTRACTION_LIMIT_EXCEEDED
+    summary = Column(Text, nullable=True)
+    key_facts_json = Column(Text, nullable=True)
+    legal_issues_json = Column(Text, nullable=True)
+    important_points_json = Column(Text, nullable=True)
+
+    ai_provider = Column(String, nullable=True)
+    ai_model = Column(String, nullable=True)
+    generation_duration_ms = Column(Integer, nullable=True)
+    error_message = Column(String, nullable=True)
+
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("version_id", name="uq_version_summary"),
+    )
+
+    version = relationship("DocumentVersion", back_populates="ai_summary")
     document = relationship("Document")
 
 

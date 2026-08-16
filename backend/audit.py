@@ -43,6 +43,8 @@ class AuditEventType:
     # AI Analysis
     AI_METADATA_EXTRACTED = "AI_METADATA_EXTRACTED"
     AI_METADATA_EXTRACTION_FAILED = "AI_METADATA_EXTRACTION_FAILED"
+    AI_SUMMARY_GENERATED = "AI_SUMMARY_GENERATED"
+    AI_SUMMARY_GENERATION_FAILED = "AI_SUMMARY_GENERATION_FAILED"
 
     # Administration
     VAULT_RESET = "VAULT_RESET"
@@ -79,6 +81,9 @@ SENSITIVE_KEYS = {
     "raw_text",
     "extracted_text",
     "document_text",
+    "summary_prompt",
+    "full_summary",
+    "full_text",
 }
 
 

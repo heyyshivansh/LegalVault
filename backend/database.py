@@ -37,10 +37,14 @@ def migrate_schema() -> None:
                 if column_name not in existing_columns:
                     connection.execute(text(statement))
 
-    # Ensure document_version_metadata table exists
+    # Ensure document_version_metadata and document_version_summaries tables exist
     if "document_version_metadata" not in table_names:
         from models import DocumentVersionMetadata
         DocumentVersionMetadata.__table__.create(bind=engine, checkfirst=True)
+
+    if "document_version_summaries" not in table_names:
+        from models import DocumentVersionSummary
+        DocumentVersionSummary.__table__.create(bind=engine, checkfirst=True)
 
     # Backfill legacy documents into document_versions purely off-chain (no blockchain calls)
     if "document_versions" in inspector.get_table_names() and "documents" in inspector.get_table_names():

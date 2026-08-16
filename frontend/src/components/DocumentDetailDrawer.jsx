@@ -10,6 +10,8 @@ import {
   fetchDocumentAuditTrail,
   extractVersionMetadata,
   fetchVersionMetadata,
+  generateVersionSummary,
+  fetchVersionSummary,
 } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { getVersionIntegrity } from '../utils/integrity';
@@ -38,6 +40,13 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
   const [extractingMetaVer, setExtractingMetaVer] = useState(null);
   const [metaError, setMetaError] = useState(null);
 
+  // AI Summary State
+  const [selectedSummaryVersion, setSelectedSummaryVersion] = useState(1);
+  const [summaryMap, setSummaryMap] = useState({});
+  const [loadingSummaryVer, setLoadingSummaryVer] = useState(null);
+  const [generatingSummaryVer, setGeneratingSummaryVer] = useState(null);
+  const [summaryError, setSummaryError] = useState(null);
+
   // Audit Trail State
   const [auditEvents, setAuditEvents] = useState([]);
   const [auditTotal, setAuditTotal] = useState(0);
@@ -55,6 +64,16 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
   const [revisionError, setRevisionError] = useState('');
   const [revisionDuplicate, setRevisionDuplicate] = useState(null);
   const fileInputRef = useRef(null);
+  const revisionSectionRef = useRef(null);
+
+  useEffect(() => {
+    if (isUploadRevisionOpen && revisionSectionRef.current) {
+      revisionSectionRef.current.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      });
+    }
+  }, [isUploadRevisionOpen]);
 
   const resetRevisionForm = useCallback(() => {
     setRevisionFile(null);
@@ -95,6 +114,36 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
     }
   };
 
+  const loadVersionSummary = useCallback(async (versionNum) => {
+    if (!documentId || !versionNum) return;
+    setLoadingSummaryVer(versionNum);
+    setSummaryError(null);
+    try {
+      const data = await fetchVersionSummary(documentId, versionNum);
+      setSummaryMap((prev) => ({ ...prev, [versionNum]: data }));
+    } catch (err) {
+      console.warn(`Failed to load AI summary for v${versionNum}:`, err);
+    } finally {
+      setLoadingSummaryVer(null);
+    }
+  }, [documentId]);
+
+  const handleGenerateSummary = async (versionNum, force = false) => {
+    if (!documentId || !versionNum) return;
+    setGeneratingSummaryVer(versionNum);
+    setSummaryError(null);
+    try {
+      const data = await generateVersionSummary(documentId, versionNum, force);
+      setSummaryMap((prev) => ({ ...prev, [versionNum]: data }));
+      // Refresh audit trail
+      loadAuditTrail();
+    } catch (err) {
+      setSummaryError(err.message || 'AI summary generation failed.');
+    } finally {
+      setGeneratingSummaryVer(null);
+    }
+  };
+
   const loadAuditTrail = useCallback(async (actionFilter = auditActionFilter, versionFilter = auditVersionFilter) => {
     if (!documentId) return;
     setAuditLoading(true);
@@ -126,6 +175,7 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
 
       const activeVer = data.version || 1;
       setSelectedMetaVersion(activeVer);
+      setSelectedSummaryVersion(activeVer);
 
       // Load Version History
       try {
@@ -142,6 +192,14 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
         setMetadataMap((prev) => ({ ...prev, [activeVer]: metaData }));
       } catch (err) {
         console.warn('Failed to load active version AI metadata:', err);
+      }
+
+      // Load AI Summary for the active version
+      try {
+        const summaryData = await fetchVersionSummary(documentId, activeVer);
+        setSummaryMap((prev) => ({ ...prev, [activeVer]: summaryData }));
+      } catch (err) {
+        console.warn('Failed to load active version AI summary:', err);
       }
 
       // If owner or admin, load active shares
@@ -778,9 +836,249 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
                 })()}
               </div>
 
+              {/* AI-Generated Document Summary Section */}
+              <div style={{ backgroundColor: '#F8FAFC', border: '1px solid #CBD5E1', borderRadius: 'var(--radius-sm)', padding: '1.25rem', marginBottom: '1.5rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <span className="serif-heading" style={{ fontSize: '1.05rem', color: 'var(--accent-navy)' }}>
+                      AI Document Summary
+                    </span>
+                    <span className="badge" style={{ backgroundColor: '#EEF2FF', color: '#4338CA', border: '1px solid #C7D2FE', fontWeight: 700, fontSize: '0.72rem' }}>
+                      REVISION v{selectedSummaryVersion}
+                    </span>
+                  </div>
+
+                  {/* Version Picker for Summary */}
+                  {versions.length > 1 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                      <span style={{ fontSize: '0.72rem', color: 'var(--ink-muted)', fontWeight: 600 }}>Inspect Summary:</span>
+                      {versions.map((v) => (
+                        <button
+                          key={v.version_number}
+                          type="button"
+                          className={`btn btn-sm ${selectedSummaryVersion === v.version_number ? 'btn-primary' : 'btn-secondary'}`}
+                          style={{
+                            fontSize: '0.68rem',
+                            padding: '0.15rem 0.45rem',
+                            minWidth: '2rem',
+                          }}
+                          onClick={() => {
+                            setSelectedSummaryVersion(v.version_number);
+                            if (!summaryMap[v.version_number]) {
+                              loadVersionSummary(v.version_number);
+                            }
+                          }}
+                        >
+                          v{v.version_number}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Explicit Disclaimer Notice */}
+                <div style={{ fontSize: '0.74rem', color: 'var(--ink-secondary)', backgroundColor: '#FFFFFF', border: '1px solid #E2E8F0', padding: '0.45rem 0.65rem', borderRadius: 'var(--radius-xs)', marginBottom: '0.85rem' }}>
+                  ℹ <strong>Evidentiary Notice:</strong> AI-generated summary is an analytical overview for rapid docket review. It does <em>not</em> constitute verified legal evidence or official court findings.
+                </div>
+
+                {summaryError && (
+                  <div className="verdict-banner tampered" style={{ marginBottom: '0.85rem', padding: '0.55rem 0.75rem' }}>
+                    <div className="verdict-explanation" style={{ margin: 0, fontSize: '0.78rem' }}>
+                      {summaryError}
+                    </div>
+                  </div>
+                )}
+
+                {/* Loading / Generating State */}
+                {generatingSummaryVer === selectedSummaryVersion || loadingSummaryVer === selectedSummaryVersion ? (
+                  <div style={{ textAlign: 'center', padding: '1.75rem 1rem', backgroundColor: '#FFFFFF', borderRadius: 'var(--radius-xs)', border: '1px solid #E2E8F0' }}>
+                    <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--accent-navy)', marginBottom: '0.25rem' }}>
+                      {generatingSummaryVer === selectedSummaryVersion ? 'Synthesizing Legal Summary with AI Model...' : 'Retrieving Summary for Version...'}
+                    </div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
+                      Analyzing narrative, key facts, legal issues, and procedural points.
+                    </div>
+                  </div>
+                ) : (() => {
+                  const currentSummary = summaryMap[selectedSummaryVersion];
+                  const status = currentSummary?.status || 'NOT_GENERATED';
+
+                  if (status === 'NOT_GENERATED') {
+                    return (
+                      <div style={{ textAlign: 'center', padding: '1.25rem 1rem', backgroundColor: '#FFFFFF', borderRadius: 'var(--radius-xs)', border: '1px dashed #CBD5E1' }}>
+                        <div style={{ fontSize: '0.82rem', color: 'var(--ink-secondary)', marginBottom: '0.75rem' }}>
+                          No AI summary has been generated for <strong>Version {selectedSummaryVersion}</strong> yet.
+                        </div>
+                        {canManageDoc ? (
+                          <button
+                            type="button"
+                            className="btn btn-primary btn-sm"
+                            style={{ fontSize: '0.78rem', padding: '0.35rem 0.85rem' }}
+                            onClick={() => handleGenerateSummary(selectedSummaryVersion, false)}
+                          >
+                            ⚡ Generate AI Summary
+                          </button>
+                        ) : (
+                          <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
+                            Summary generation can be triggered by the document owner or administrator.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  if (status === 'EXTRACTION_UNAVAILABLE') {
+                    return (
+                      <div style={{ backgroundColor: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 'var(--radius-xs)', padding: '0.85rem 1rem' }}>
+                        <div style={{ fontWeight: 700, fontSize: '0.82rem', color: '#92400E', marginBottom: '0.25rem' }}>
+                          ⚠ TEXT EXTRACTION UNAVAILABLE
+                        </div>
+                        <div style={{ fontSize: '0.78rem', color: '#78350F', marginBottom: '0.65rem' }}>
+                          {currentSummary?.error_message || 'Document contains insufficient extractable text or appears to be a scanned image-only PDF. OCR is not enabled for this vault instance.'}
+                        </div>
+                        {canManageDoc && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ fontSize: '0.72rem', backgroundColor: '#FFFFFF' }}
+                            onClick={() => handleGenerateSummary(selectedSummaryVersion, true)}
+                          >
+                            ↻ Retry Summarization
+                          </button>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  if (status === 'EXTRACTION_LIMIT_EXCEEDED') {
+                    return (
+                      <div style={{ backgroundColor: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 'var(--radius-xs)', padding: '0.85rem 1rem' }}>
+                        <div style={{ fontWeight: 700, fontSize: '0.82rem', color: '#92400E', marginBottom: '0.25rem' }}>
+                          ⚠ PROCESSING SIZE LIMIT EXCEEDED
+                        </div>
+                        <div style={{ fontSize: '0.78rem', color: '#78350F', marginBottom: '0.65rem' }}>
+                          {currentSummary?.error_message || 'Document text exceeds maximum AI processing limit of 500,000 characters.'}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (status === 'FAILED') {
+                    return (
+                      <div style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 'var(--radius-xs)', padding: '0.85rem 1rem' }}>
+                        <div style={{ fontWeight: 700, fontSize: '0.82rem', color: '#B91C1C', marginBottom: '0.25rem' }}>
+                          ⚠ SUMMARY GENERATION FAILED
+                        </div>
+                        <div style={{ fontSize: '0.78rem', color: '#991B1B', marginBottom: '0.65rem' }}>
+                          {currentSummary?.error_message || 'An error occurred while communicating with the AI summarization service.'}
+                        </div>
+                        {canManageDoc && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ fontSize: '0.72rem', backgroundColor: '#FFFFFF' }}
+                            onClick={() => handleGenerateSummary(selectedSummaryVersion, true)}
+                          >
+                            ↻ Retry Summarization
+                          </button>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  // Status is COMPLETED
+                  return (
+                    <div style={{ backgroundColor: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: 'var(--radius-xs)', padding: '1rem' }}>
+                      {/* Narrative Overview */}
+                      <div style={{ marginBottom: '0.85rem' }}>
+                        <div className="stat-label" style={{ marginBottom: '0.25rem' }}>Overview & Synthesis</div>
+                        <p style={{ fontSize: '0.85rem', lineHeight: 1.5, color: 'var(--ink-primary)', margin: 0, fontWeight: 500 }}>
+                          {currentSummary.summary || 'Summary narrative not available.'}
+                        </p>
+                      </div>
+
+                      {/* Key Facts Section */}
+                      {currentSummary.key_facts && currentSummary.key_facts.length > 0 && (
+                        <div style={{ borderTop: '1px solid #F1F5F9', paddingTop: '0.65rem', marginBottom: '0.75rem' }}>
+                          <div className="stat-label" style={{ marginBottom: '0.35rem' }}>
+                            Key Factual Assertions ({currentSummary.key_facts.length})
+                          </div>
+                          <ul style={{ margin: 0, paddingLeft: '1.25rem', fontSize: '0.78rem', color: 'var(--ink-primary)', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                            {currentSummary.key_facts.map((fact, fIdx) => (
+                              <li key={fIdx} style={{ lineHeight: 1.4 }}>{fact}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* Legal Issues Section */}
+                      {currentSummary.legal_issues && currentSummary.legal_issues.length > 0 && (
+                        <div style={{ borderTop: '1px solid #F1F5F9', paddingTop: '0.65rem', marginBottom: '0.75rem' }}>
+                          <div className="stat-label" style={{ marginBottom: '0.35rem' }}>
+                            Legal Claims & Grounds ({currentSummary.legal_issues.length})
+                          </div>
+                          <ul style={{ margin: 0, paddingLeft: '1.25rem', fontSize: '0.78rem', color: 'var(--ink-primary)', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                            {currentSummary.legal_issues.map((issue, iIdx) => (
+                              <li key={iIdx} style={{ lineHeight: 1.4 }}>{issue}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* Important Points / Relief / Deadlines */}
+                      {currentSummary.important_points && currentSummary.important_points.length > 0 && (
+                        <div style={{ borderTop: '1px solid #F1F5F9', paddingTop: '0.65rem', marginBottom: '0.75rem' }}>
+                          <div className="stat-label" style={{ marginBottom: '0.35rem' }}>
+                            Important Points, Relief & Deadlines ({currentSummary.important_points.length})
+                          </div>
+                          <ul style={{ margin: 0, paddingLeft: '1.25rem', fontSize: '0.78rem', color: 'var(--ink-primary)', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                            {currentSummary.important_points.map((pt, pIdx) => (
+                              <li key={pIdx} style={{ lineHeight: 1.4 }}>{pt}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* Summary Footer: Provider, Duration, IST Timestamp, Re-generate Action */}
+                      <div style={{ borderTop: '1px solid #F1F5F9', paddingTop: '0.65rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--ink-muted)' }}>
+                          {currentSummary.ai_provider === 'mock' ? (
+                            <span>Provider: <strong>Mock (offline heuristics)</strong></span>
+                          ) : (
+                            <span>Provider: <strong>Google Gemini</strong> · {currentSummary.ai_model || 'gemini-2.0-flash'}</span>
+                          )}
+                          {currentSummary.generation_duration_ms && (
+                            <span> · {currentSummary.generation_duration_ms} ms</span>
+                          )}
+                          {currentSummary.updated_at && (
+                            <span> · {formatDate(currentSummary.updated_at)}</span>
+                          )}
+                        </div>
+
+                        {canManageDoc && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ fontSize: '0.72rem', padding: '0.2rem 0.55rem' }}
+                            onClick={() => handleGenerateSummary(selectedSummaryVersion, true)}
+                            disabled={generatingSummaryVer === selectedSummaryVersion}
+                            title="Force re-generation of AI summary for this revision"
+                          >
+                            ↻ Re-generate Summary
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
               {/* Revision Upload Form Modal Overlay */}
               {isUploadRevisionOpen && (
-                <div style={{ backgroundColor: '#F8FAFC', border: '1px solid #CBD5E1', borderRadius: 'var(--radius-sm)', padding: '1.25rem', marginBottom: '1.5rem' }}>
+                <div
+                  ref={revisionSectionRef}
+                  style={{ backgroundColor: '#F8FAFC', border: '1px solid #CBD5E1', borderRadius: 'var(--radius-sm)', padding: '1.25rem', marginBottom: '1.5rem' }}
+                >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                       <span className="serif-heading" style={{ fontSize: '1.05rem', color: 'var(--accent-navy)' }}>

@@ -151,15 +151,81 @@ def normalize_extracted_schema(data: dict | None) -> dict:
     }
 
 
+# --- Approved Summarization Schema Definition ---
+
+DEFAULT_EMPTY_SUMMARY = {
+    "summary": None,
+    "key_facts": [],
+    "legal_issues": [],
+    "important_points": []
+}
+
+
+def normalize_summary_schema(data: dict | None) -> dict:
+    """
+    Normalizes raw summarizer output strictly against the approved LegalSummarySchema.
+    Guarantees no arbitrary confidence scores, summaries are strings without leading artifacts, and lists are string arrays.
+    """
+    if not isinstance(data, dict):
+        data = {}
+
+    summary_text = data.get("summary")
+    if summary_text and isinstance(summary_text, str):
+        summary_text = re.sub(r'^[.\-*_:\s#•]+', '', summary_text).strip()
+        summary_text = summary_text if summary_text else None
+    else:
+        summary_text = None
+
+    def clean_str_list(raw_list: Any) -> list[str]:
+        cleaned = []
+        if isinstance(raw_list, list):
+            for item in raw_list:
+                if isinstance(item, str) and item.strip():
+                    item_clean = re.sub(r'^[•\-\*#_]+\s*', '', item.strip()).strip()
+                    if item_clean:
+                        cleaned.append(item_clean)
+                elif isinstance(item, dict):
+                    val = item.get("text") or item.get("point") or item.get("fact") or item.get("issue")
+                    if val and str(val).strip():
+                        val_clean = re.sub(r'^[•\-\*#_]+\s*', '', str(val).strip()).strip()
+                        if val_clean:
+                            cleaned.append(val_clean)
+        elif isinstance(raw_list, str) and raw_list.strip():
+            for part in raw_list.split("\n"):
+                part_clean = re.sub(r'^[•\-\*\d\.\)\s#_]+\s*', '', part).strip()
+                if part_clean:
+                    cleaned.append(part_clean)
+        return cleaned
+
+    key_facts = clean_str_list(data.get("key_facts"))
+    legal_issues = clean_str_list(data.get("legal_issues"))
+    important_points = clean_str_list(data.get("important_points"))
+
+    return {
+        "summary": summary_text,
+        "key_facts": key_facts,
+        "legal_issues": legal_issues,
+        "important_points": important_points
+    }
+
+
 # --- Base Provider Interface ---
 
 class BaseAIProvider(ABC):
-    """Abstract base class defining the standard interface for AI metadata extraction providers."""
+    """Abstract base class defining the standard interface for AI metadata extraction and summarization providers."""
 
     @abstractmethod
     def extract_metadata(self, text: str, document_hint: dict | None = None) -> dict:
         """
         Analyzes document text and returns structured dictionary conforming to LegalMetadataSchema.
+        Must raise AIServiceError or subclasses on failure.
+        """
+        pass
+
+    @abstractmethod
+    def generate_summary(self, text: str, document_hint: dict | None = None) -> dict:
+        """
+        Analyzes document text and returns structured dictionary conforming to LegalSummarySchema.
         Must raise AIServiceError or subclasses on failure.
         """
         pass
@@ -290,6 +356,97 @@ class GeminiProvider(BaseAIProvider):
             if isinstance(e, AIServiceError):
                 raise e
             raise AIParsingError(f"Error processing Gemini extraction output: {str(e)}")
+
+    def generate_summary(self, text: str, document_hint: dict | None = None) -> dict:
+        hint_str = ""
+        if document_hint:
+            hint_parts = []
+            if document_hint.get("filename"):
+                hint_parts.append(f"Filename: {document_hint['filename']}")
+            if document_hint.get("case_number"):
+                hint_parts.append(f"Recorded Case Number: {document_hint['case_number']}")
+            if hint_parts:
+                hint_str = f"\nContext Hints: {', '.join(hint_parts)}\n"
+
+        system_instruction = (
+            "You are an expert judicial analyst and legal summarizer for an Indian judicial eVault system (LegalVault). "
+            "Synthesize an accurate, objective, structured legal summary strictly from the provided document text. "
+            "\nANTI-HALLUCINATION & LEGAL SAFETY DIRECTIVES:\n"
+            "1. Base all summary statements, facts, and legal issues STRICTLY on the text provided.\n"
+            "2. Never invent outcomes, court decisions, statutory violations, relief, or parties not explicitly mentioned.\n"
+            "3. If a fact, claim, or procedural outcome is not stated, do not infer it; clearly state 'Not specified in the document' if necessary.\n"
+            "4. Maintain a neutral, professional legal tone appropriate for forensic review.\n"
+            "5. Return strictly valid JSON conforming to the requested schema with NO confidence score."
+        )
+
+        json_schema_prompt = (
+            "Summarize the document into this exact JSON structure:\n"
+            "{\n"
+            '  "summary": "string (Concise 2-4 sentence narrative synthesis of the document, its nature, parties, and core subject matter)",\n'
+            '  "key_facts": ["string (Essential factual assertions, background context, and statements of fact)"],\n'
+            '  "legal_issues": ["string (Core legal questions, disputed claims, statutory grounds, or causes of action)"],\n'
+            '  "important_points": ["string (Requested relief / prayer, procedural deadlines, obligations, or key dates)"]\n'
+            "}"
+        )
+
+        user_content = f"{hint_str}\nDocument Text:\n\"\"\"\n{text}\n\"\"\"\n\n{json_schema_prompt}"
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": f"{system_instruction}\n\n{user_content}"}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "response_mime_type": "application/json",
+                "temperature": 0.1,
+            }
+        }
+
+        try:
+            resp = requests.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=self.timeout_seconds,
+            )
+        except requests.exceptions.Timeout:
+            raise AITimeoutError(f"Gemini API summarization request timed out after {self.timeout_seconds} seconds.")
+        except requests.exceptions.RequestException as e:
+            raise AIServiceError(f"Network error connecting to Gemini API: {str(e)}")
+
+        if resp.status_code != 200:
+            err_msg = f"Gemini API error (HTTP {resp.status_code})"
+            try:
+                err_body = resp.json()
+                if "error" in err_body and "message" in err_body["error"]:
+                    err_msg += f": {err_body['error']['message']}"
+            except Exception:
+                pass
+            raise AIServiceError(err_msg)
+
+        try:
+            resp_data = resp.json()
+            candidates = resp_data.get("candidates", [])
+            if not candidates:
+                raise AIParsingError("Gemini API returned no candidate response for summarization.")
+
+            content_parts = candidates[0].get("content", {}).get("parts", [])
+            if not content_parts:
+                raise AIParsingError("Gemini API returned empty content parts for summarization.")
+
+            raw_text = content_parts[0].get("text", "").strip()
+            parsed_json = json.loads(raw_text)
+            return normalize_summary_schema(parsed_json)
+        except json.JSONDecodeError as e:
+            raise AIParsingError(f"Failed to parse Gemini summary response as JSON: {str(e)}")
+        except Exception as e:
+            if isinstance(e, AIServiceError):
+                raise e
+            raise AIParsingError(f"Error processing Gemini summary output: {str(e)}")
 
 
 # --- Mock Provider Implementation ---
@@ -577,12 +734,242 @@ class MockProvider(BaseAIProvider):
 
         return normalize_extracted_schema(raw_result)
 
+    def generate_summary(self, text: str, document_hint: dict | None = None) -> dict:
+        """
+        Simple, deterministic offline heuristic summarizer for tests, CI/CD, and air-gapped demos.
+        Strictly source-derived, zero hallucinations.
+        """
+        if not text:
+            return {
+                "summary": "No extractable text content was provided for summarization.",
+                "key_facts": ["No extractable text provided."],
+                "legal_issues": ["No explicit statutory violations or contested issues specified in the text."],
+                "important_points": ["Refer to primary document text for specific procedural dates and covenants."]
+            }
+
+        # 1. Clean document text & strip leading/trailing artifacts
+        cleaned_text = re.sub(r'^[.\-*_:\s#•]+', '', text).strip()
+
+        # Protect common abbreviations from being treated as sentence endings
+        protected_text = cleaned_text
+        abbreviations = [
+            r'\bNo\.', r'\bvs\.', r'\bv\.', r'\bAdv\.', r'\bHon\.', r'\bSh\.', r'\bSmt\.',
+            r'\bMr\.', r'\bMrs\.', r'\bMs\.', r'\bDr\.', r'\bSec\.', r'\bArt\.', r'\bpara\.',
+            r'\bcl\.', r'\bvol\.', r'\bLtd\.', r'\bPvt\.', r'\bCo\.', r'\bCorp\.', r'\bInc\.',
+            r'\bU\.P\.', r'\bU/S\.', r'\bi\.e\.', r'\be\.g\.', r'\bW\.P\.', r'\bC\.A\.', r'\bS\.L\.P\.'
+        ]
+        for abbr_pat in abbreviations:
+            protected_text = re.sub(abbr_pat, lambda m: m.group(0).replace('.', '@DOT@'), protected_text, flags=re.IGNORECASE)
+
+        # 2. Tokenize into sentences and lines
+        raw_segments = re.split(r'\n+|(?:(?<=[.!?])\s+(?=[A-Z0-9"\'\(\[]))', protected_text)
+        cleaned_sentences = []
+        for seg in raw_segments:
+            if not seg:
+                continue
+            s = seg.replace('@DOT@', '.')
+            s = re.sub(r'^[.\-*_:\s#•]+', '', s).strip()
+            s = re.sub(r'[.\-*_:\s#•]+$', '', s).strip()
+            if len(s) >= 10:
+                cleaned_sentences.append(s)
+
+        # Identify document type
+        text_lower = cleaned_text.lower()
+        doc_type = "Legal Document"
+        if "affidavit" in text_lower:
+            doc_type = "Affidavit"
+        elif "writ petition" in text_lower or "petition" in text_lower:
+            doc_type = "Writ Petition"
+        elif "contract" in text_lower or "agreement" in text_lower:
+            doc_type = "Commercial Contract"
+        elif "bail" in text_lower:
+            doc_type = "Bail Application"
+
+        # 3. Extract narrative summary (clean 2-3 sentence synthesis)
+        narrative_candidates = []
+        for s in cleaned_sentences:
+            # Skip pure docket and court headers
+            if re.match(r'^(?:IN THE|DISTRICT COURT|HIGH COURT|SUPREME COURT|CASE NO|AFFIDAVIT OF|WRIT PETITION|DATED|SUBJECT|FILING|HEARING|DEPONENT|VERSUS|PETITIONER|RESPONDENT)', s, re.IGNORECASE):
+                continue
+            if len(s) > 25:
+                formatted_s = s if s.endswith(('.', '!', '?')) else f"{s}."
+                narrative_candidates.append(formatted_s)
+                if len(narrative_candidates) >= 3:
+                    break
+
+        if not narrative_candidates:
+            for s in cleaned_sentences:
+                if len(s) > 20 and not re.match(r'^(?:CASE NO|IN THE)', s, re.IGNORECASE):
+                    formatted_s = s if s.endswith(('.', '!', '?')) else f"{s}."
+                    narrative_candidates.append(formatted_s)
+                    if len(narrative_candidates) >= 2:
+                        break
+
+        if narrative_candidates:
+            summary_narrative = " ".join(narrative_candidates)
+        else:
+            summary_narrative = f"This {doc_type.lower()} sets forth legal filings and factual affirmations submitted in the matter."
+
+        summary_narrative = re.sub(r'^[.\-*_:\s#•]+', '', summary_narrative).strip()
+
+        # 4. Extract key facts (concise, source-derived facts)
+        key_facts = []
+        for s in cleaned_sentences:
+            s_lower = s.lower()
+            if any(k in s_lower for k in [
+                "submitted by", "affidavit is submitted", "in support of", "concerning",
+                "ownership and possession", "disputed property", "agricultural land",
+                "transferred under", "agreement dated", "executed on", "title transfer",
+                "scheduled for hearing", "hearing on", "filing date", "deponent", "states that",
+                "affirmation", "covenant", "situated at", "in the matter of", "versus"
+            ]):
+                if not re.match(r'^(?:CASE NO|SUBJECT:|AFFIDAVIT OF|IN THE HIGH COURT|IN THE DISTRICT)', s, re.IGNORECASE):
+                    formatted_fact = s if s.endswith(('.', '!', '?')) else f"{s}."
+                    if formatted_fact not in key_facts and len(s) > 15:
+                        key_facts.append(formatted_fact)
+                        if len(key_facts) >= 4:
+                            break
+
+        if not key_facts:
+            key_facts = ["Factual background and procedural statements as detailed in the filing text."]
+
+        # 5. Extract legal issues / claims & grounds (concise targeted clauses/issues)
+        legal_issues = []
+        for s in cleaned_sentences:
+            s_lower = s.lower()
+
+            # Clause A: Ownership / Title / Partition dispute clause
+            dispute_match = re.search(r'concerning\s+(?:the\s+)?(ownership\s+and\s+possession\s+of\s+[^.!?]+|title\s+dispute[^.!?]*|agricultural\s+land[^.!?]*|partition[^.!?]*)', s, re.IGNORECASE)
+            if dispute_match:
+                issue_str = f"The dispute concerns {dispute_match.group(1).strip()}."
+                issue_str = re.sub(r'\s+\.$', '.', issue_str)
+                if not issue_str.endswith('.'):
+                    issue_str += '.'
+                if issue_str not in legal_issues:
+                    legal_issues.append(issue_str)
+
+            # Clause B: Relief sought clause
+            relief_match = re.search(r'(?:seeks|prays for|requests)\s+(?:appropriate\s+)?relief\s+regarding\s+([^.!?]+)', s, re.IGNORECASE)
+            if relief_match:
+                issue_str = f"The petitioner seeks relief regarding {relief_match.group(1).strip()}."
+                issue_str = re.sub(r'\s+\.$', '.', issue_str)
+                if not issue_str.endswith('.'):
+                    issue_str += '.'
+                if issue_str not in legal_issues:
+                    legal_issues.append(issue_str)
+
+            # Clause C: Challenge to municipal / governmental action or breach
+            challenge_match = re.search(r'(?:challenge\s+to|grievance\s+regarding|breach\s+of)\s+([^.!?]+)', s, re.IGNORECASE)
+            if challenge_match:
+                issue_str = f"Challenge regarding {challenge_match.group(1).strip()}."
+                if not issue_str.endswith('.'):
+                    issue_str += '.'
+                if issue_str not in legal_issues:
+                    legal_issues.append(issue_str)
+
+            # Clause D: Subject line with partition / suit / dispute
+            if s_lower.startswith("subject:"):
+                sub_val = s[8:].strip()
+                issue_str = f"Subject matter: {sub_val}"
+                if not issue_str.endswith('.'):
+                    issue_str += '.'
+                if issue_str not in legal_issues:
+                    legal_issues.append(issue_str)
+
+            # Clause E: Prayer clause
+            if s_lower.startswith("prayer:") or "prays for" in s_lower:
+                pm = re.search(r'(?:prayer:\s*|prays for\s*)([^.!?\n]+)', s, re.IGNORECASE)
+                if pm:
+                    p_text = pm.group(1).strip()
+                    p_str = f"Prayer for {p_text}." if not p_text.lower().startswith("the") else f"{p_text}."
+                    if p_str not in legal_issues:
+                        legal_issues.append(p_str)
+
+            if len(legal_issues) >= 3:
+                break
+
+        # Fallback to discrete legal sentence if no targeted clause matched
+        if not legal_issues:
+            for s in cleaned_sentences:
+                s_lower = s.lower()
+                if any(k in s_lower for k in ["dispute", "suit no", "in connection with", "challenge", "breach", "illegal", "ground", "injunction", "interim relief"]):
+                    if not re.match(r'^(?:CASE NO|IN THE|DATED|AFFIDAVIT OF)', s, re.IGNORECASE):
+                        formatted_issue = s if s.endswith(('.', '!', '?')) else f"{s}."
+                        if formatted_issue not in legal_issues and len(s) > 20:
+                            legal_issues.append(formatted_issue)
+                            if len(legal_issues) >= 2:
+                                break
+
+        if not legal_issues:
+            legal_issues = ["No explicit statutory violations or contested issues specified in the text."]
+
+        # 6. Extract important points / relief / deadlines (explicit procedural facts)
+        important_points = []
+
+        # 6a. Agreement / Transfer Dates
+        agreement_match = re.search(r'(?:agreement|deed|contract|covenant|transfer(?:red)?)\s+(?:dated|executed on)\s+(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\s+\d{4}|\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
+        if agreement_match:
+            important_points.append(f"Agreement dated {agreement_match.group(1)}.")
+
+        # 6b. Relief Sought / Prayer
+        relief_pt_match = re.search(r'(?:seeks|prays for|requests)\s+(?:appropriate\s+)?relief\s+regarding\s+([^.!?\n]+)', text, re.IGNORECASE)
+        if relief_pt_match:
+            important_points.append(f"Relief sought regarding {relief_pt_match.group(1).strip()}.")
+        elif re.search(r'prayer:\s*([^.!?\n]+)', text, re.IGNORECASE):
+            pm = re.search(r'prayer:\s*([^.!?\n]+)', text, re.IGNORECASE)
+            important_points.append(f"Prayer: {pm.group(1).strip()}.")
+        elif re.search(r'prays for\s+([^.!?\n]+)', text, re.IGNORECASE):
+            pm = re.search(r'prays for\s+([^.!?\n]+)', text, re.IGNORECASE)
+            important_points.append(f"Prayer: {pm.group(1).strip()}.")
+
+        # 6c. Hearing / Filing / Order Dates
+        hearing_match = re.search(r'(?:scheduled for\s+)?hearing\s+on\s+(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\s+\d{4}|\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
+        if hearing_match:
+            important_points.append(f"Hearing scheduled for {hearing_match.group(1)}.")
+        elif re.search(r'hearing date:\s*(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\s+\d{4}|\d{4}-\d{2}-\d{2})', text, re.IGNORECASE):
+            hm = re.search(r'hearing date:\s*(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\s+\d{4}|\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
+            important_points.append(f"Hearing Date: {hm.group(1)}.")
+
+        filing_match = re.search(r'filing date:\s*(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\s+\d{4}|\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
+        if filing_match:
+            important_points.append(f"Filing Date: {filing_match.group(1)}.")
+
+        order_match = re.search(r'dated:\s*(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\s+\d{4}|\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
+        if order_match and len(important_points) < 3:
+            important_points.append(f"Dated: {order_match.group(1)}.")
+
+        # 6d. Fallback sentence scanner if explicit regex found < 2 points
+        if len(important_points) < 2:
+            for s in cleaned_sentences:
+                s_lower = s.lower()
+                if any(k in s_lower for k in ["filing date", "hearing date", "execution date", "order date", "prayer:", "prays that", "injunction", "covenant"]):
+                    if not re.match(r'^(?:AFFIDAVIT OF|IN THE)', s, re.IGNORECASE):
+                        formatted_pt = s if s.endswith(('.', '!', '?')) else f"{s}."
+                        if formatted_pt not in important_points:
+                            important_points.append(formatted_pt)
+                            if len(important_points) >= 4:
+                                break
+
+        if not important_points:
+            important_points = ["Refer to primary document text for specific procedural dates and covenants."]
+
+        raw_summary = {
+            "summary": summary_narrative,
+            "key_facts": key_facts,
+            "legal_issues": legal_issues,
+            "important_points": important_points
+        }
+        return normalize_summary_schema(raw_summary)
+
 
 # --- Core Extractor Orchestrator ---
 
+MAX_AI_TEXT_CHARS = 500000
+
+
 class AIExtractor:
     """
-    Central AI Extraction Orchestrator.
+    Central AI Extraction & Summarization Orchestrator.
     - Handles text extraction from PDF and TXT files.
     - Instantiates the active provider (Gemini or Mock) based on environment configuration.
     - Strictly prevents silent fallback from Gemini to Mock.
@@ -620,7 +1007,7 @@ class AIExtractor:
         """
         Extracts clean textual content from PDF and TXT files.
         Returns: (text, status, error_reason)
-        Status values: 'OK', 'EXTRACTION_UNAVAILABLE', 'UNSUPPORTED_FORMAT'
+        Status values: 'OK', 'EXTRACTION_UNAVAILABLE', 'EXTRACTION_LIMIT_EXCEEDED', 'UNSUPPORTED_FORMAT'
         """
         if not os.path.exists(file_path):
             return "", "EXTRACTION_UNAVAILABLE", f"Document file not found on disk at {file_path}"
@@ -644,7 +1031,10 @@ class AIExtractor:
             normalized = " ".join(cleaned.split())
 
             if len(normalized.strip()) < 20:
-                return "", "EXTRACTION_UNAVAILABLE", "Document contains insufficient text (< 20 characters) for metadata extraction."
+                return "", "EXTRACTION_UNAVAILABLE", "Document contains insufficient text (< 20 characters) for AI processing."
+
+            if len(cleaned) > MAX_AI_TEXT_CHARS:
+                return "", "EXTRACTION_LIMIT_EXCEEDED", f"Document text length ({len(cleaned):,} characters) exceeds maximum AI processing limit of {MAX_AI_TEXT_CHARS:,} characters."
 
             return cleaned, "OK", None
 
@@ -673,12 +1063,15 @@ class AIExtractor:
                 if len(normalized.strip()) < 20:
                     return "", "EXTRACTION_UNAVAILABLE", "Scanned image-only PDF or unextractable text. OCR is not enabled for this vault instance."
 
+                if len(cleaned) > MAX_AI_TEXT_CHARS:
+                    return "", "EXTRACTION_LIMIT_EXCEEDED", f"Document text length ({len(cleaned):,} characters) exceeds maximum AI processing limit of {MAX_AI_TEXT_CHARS:,} characters."
+
                 return cleaned, "OK", None
             except Exception as e:
                 return "", "EXTRACTION_UNAVAILABLE", f"Malformed or unreadable PDF document: {str(e)}"
 
         else:
-            return "", "UNSUPPORTED_FORMAT", f"AI metadata extraction currently supports PDF and TXT documents. Received format '{ext}'."
+            return "", "UNSUPPORTED_FORMAT", f"AI analysis currently supports PDF and TXT documents. Received format '{ext}'."
 
     def process_document_version(
         self,
@@ -689,7 +1082,7 @@ class AIExtractor:
         """
         Executes the end-to-end extraction pipeline on an immutable version file.
         Returns: (metadata_dict, status, error_message, duration_ms)
-        Status values: 'COMPLETED', 'EXTRACTION_UNAVAILABLE', 'FAILED'
+        Status values: 'COMPLETED', 'EXTRACTION_UNAVAILABLE', 'EXTRACTION_LIMIT_EXCEEDED', 'FAILED'
         """
         start_time = time.perf_counter()
 
@@ -701,7 +1094,7 @@ class AIExtractor:
         text, extract_status, extract_err = self.extract_text_from_file(file_path, file_type)
         if extract_status != "OK":
             duration_ms = int((time.perf_counter() - start_time) * 1000)
-            status_code = "EXTRACTION_UNAVAILABLE" if extract_status == "EXTRACTION_UNAVAILABLE" else "FAILED"
+            status_code = extract_status if extract_status in ["EXTRACTION_UNAVAILABLE", "EXTRACTION_LIMIT_EXCEEDED"] else "FAILED"
             return None, status_code, extract_err, duration_ms
 
         # 2. Invoke active provider
@@ -724,3 +1117,48 @@ class AIExtractor:
         except Exception as e:
             duration_ms = int((time.perf_counter() - start_time) * 1000)
             return None, "FAILED", f"Unexpected AI extraction failure: {str(e)}", duration_ms
+
+    def generate_summary_for_file(
+        self,
+        file_path: str,
+        file_type: str | None = None,
+        document_hint: dict | None = None,
+    ) -> tuple[dict | None, str, str | None, int]:
+        """
+        Executes the summarization pipeline on an immutable version file.
+        Returns: (summary_dict, status, error_message, duration_ms)
+        Status values: 'COMPLETED', 'EXTRACTION_UNAVAILABLE', 'EXTRACTION_LIMIT_EXCEEDED', 'FAILED'
+        """
+        start_time = time.perf_counter()
+
+        if not self.is_enabled:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", "AI summarization is disabled by administrator configuration (LEGALVAULT_AI_ENABLED=false).", duration_ms
+
+        # 1. Extract text from file
+        text, extract_status, extract_err = self.extract_text_from_file(file_path, file_type)
+        if extract_status != "OK":
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            status_code = extract_status if extract_status in ["EXTRACTION_UNAVAILABLE", "EXTRACTION_LIMIT_EXCEEDED"] else "FAILED"
+            return None, status_code, extract_err, duration_ms
+
+        # 2. Invoke active provider
+        try:
+            summary_data = self.provider.generate_summary(text, document_hint)
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return summary_data, "COMPLETED", None, duration_ms
+        except AIConfigurationError as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"AI Configuration Error: {str(e)}", duration_ms
+        except AITimeoutError as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"AI Provider Timeout: {str(e)}", duration_ms
+        except AIParsingError as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"AI Schema Validation Error: {str(e)}", duration_ms
+        except AIServiceError as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"AI Service Error: {str(e)}", duration_ms
+        except Exception as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"Unexpected AI summarization failure: {str(e)}", duration_ms
