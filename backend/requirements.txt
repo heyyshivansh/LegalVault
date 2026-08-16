@@ -5,3 +5,5 @@ python-multipart
 web3
 pyjwt
 bcrypt
+pypdf
+requests

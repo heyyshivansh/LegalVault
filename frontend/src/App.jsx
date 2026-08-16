@@ -8,6 +8,7 @@ import DocumentDetailDrawer from './components/DocumentDetailDrawer';
 import ShareDocumentModal from './components/ShareDocumentModal';
 import AdminResetModal from './components/AdminResetModal';
 import SystemAuditModal from './components/SystemAuditModal';
+import AdminDashboard from './components/AdminDashboard';
 import LoginView from './components/LoginView';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { checkApiHealth, fetchDocuments } from './services/api';
@@ -18,6 +19,7 @@ function VaultWorkspace() {
   const [documents, setDocuments] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [adminViewMode, setAdminViewMode] = useState('dashboard'); // 'dashboard' | 'docket'
 
   // Dynamic live integrity verification state: { [docId]: { versions: { [vNum]: resultObj }, lastVerifiedVersion, ... } }
   const [integrityResults, setIntegrityResults] = useState(() => {
@@ -176,18 +178,6 @@ function VaultWorkspace() {
             <h1 className="intro-title">{getWorkspaceTitle()}</h1>
             <p className="intro-description">{getWorkspaceDescription()}</p>
           </div>
-
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-            {canDeposit && (
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => setIsUploadOpen(true)}
-              >
-                + Deposit New Record
-              </button>
-            )}
-          </div>
         </div>
 
         {/* Global Connection / System Warning */}
@@ -200,57 +190,50 @@ function VaultWorkspace() {
           </div>
         )}
 
-        {/* Administration Status Strip for Admin */}
+        {/* Admin Navigation View Switcher */}
         {isAdmin && (
-          <div style={{ backgroundColor: '#FEFCE8', border: '1px solid #FEF08A', padding: '0.85rem 1.25rem', borderRadius: 'var(--radius-sm)', marginBottom: '1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                <span style={{ fontWeight: 700, fontSize: '0.78rem', color: '#854D0E', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                  ADMINISTRATIVE OVERSIGHT ACTIVE
-                </span>
-                <span className="badge" style={{ backgroundColor: '#FEF3C7', color: '#92400E', border: '1px solid #FDE68A', fontSize: '0.68rem' }}>
-                  MASTER ACCESS
-                </span>
-              </div>
-              <div style={{ fontSize: '0.8rem', color: '#713F12', marginTop: '0.15rem' }}>
-                You have unrestricted access to all vault dockets, cryptographic proofs, active shares, and system audit logs.
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                style={{ backgroundColor: '#EEF2FF', color: '#4338CA', borderColor: '#C7D2FE', fontSize: '0.75rem', padding: '0.35rem 0.75rem', fontWeight: 600 }}
-                onClick={() => setIsSystemAuditOpen(true)}
-                title="View full forensic audit trail across all users and documents"
-              >
-                📋 View System Audit Trail
-              </button>
-              <button
-                type="button"
-                className="btn btn-danger btn-sm"
-                style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem' }}
-                onClick={() => setIsResetOpen(true)}
-                title="Reset development database documents, shares, and upload files while preserving users"
-              >
-                Reset Development Vault
-              </button>
-            </div>
+          <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.85rem' }}>
+            <button
+              type="button"
+              className={`btn btn-sm ${adminViewMode === 'dashboard' ? 'btn-primary' : 'btn-secondary'}`}
+              style={{ fontWeight: 600, fontSize: '0.8rem' }}
+              onClick={() => setAdminViewMode('dashboard')}
+            >
+              📊 Administrative Dashboard
+            </button>
+            <button
+              type="button"
+              className={`btn btn-sm ${adminViewMode === 'docket' ? 'btn-primary' : 'btn-secondary'}`}
+              style={{ fontWeight: 600, fontSize: '0.8rem' }}
+              onClick={() => setAdminViewMode('docket')}
+            >
+              📁 Docket Repository ({documents.length})
+            </button>
           </div>
         )}
 
-        {/* Summary Metric Strip */}
-        <StatsStrip documents={documents} />
+        {isAdmin && adminViewMode === 'dashboard' ? (
+          <AdminDashboard
+            onInspectDocument={(id) => setInspectingDocId(id)}
+            onOpenSystemAudit={() => setIsSystemAuditOpen(true)}
+            onOpenResetVault={() => setIsResetOpen(true)}
+            onSwitchToDocket={() => setAdminViewMode('docket')}
+          />
+        ) : (
+          <>
+            {/* Summary Metric Strip */}
+            <StatsStrip documents={documents} />
 
-        {/* Legal Docket Table */}
-        <DocumentList
-          documents={documents}
-          isLoading={isLoading}
-          integrityResults={integrityResults}
-          onVerifyDocument={(id) => handleOpenVerify(id)}
-          onInspectDocument={(id) => setInspectingDocId(id)}
-        />
+            {/* Legal Docket Table */}
+            <DocumentList
+              documents={documents}
+              isLoading={isLoading}
+              integrityResults={integrityResults}
+              onVerifyDocument={(id) => handleOpenVerify(id)}
+              onInspectDocument={(id) => setInspectingDocId(id)}
+            />
+          </>
+        )}
       </main>
 
       {/* Upload Modal (Only accessible if canDeposit) */}

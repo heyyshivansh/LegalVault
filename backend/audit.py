@@ -40,6 +40,10 @@ class AuditEventType:
     ACCESS_DENIED = "ACCESS_DENIED"
     ACTION_DENIED = "ACTION_DENIED"
 
+    # AI Analysis
+    AI_METADATA_EXTRACTED = "AI_METADATA_EXTRACTED"
+    AI_METADATA_EXTRACTION_FAILED = "AI_METADATA_EXTRACTION_FAILED"
+
     # Administration
     VAULT_RESET = "VAULT_RESET"
 
@@ -61,7 +65,21 @@ class AuditResourceType:
     SYSTEM = "SYSTEM"
 
 
-SENSITIVE_KEYS = {"password", "plain_password", "token", "access_token", "secret", "private_key", "file_bytes"}
+SENSITIVE_KEYS = {
+    "password",
+    "plain_password",
+    "token",
+    "access_token",
+    "secret",
+    "private_key",
+    "file_bytes",
+    "api_key",
+    "gemini_api_key",
+    "prompt",
+    "raw_text",
+    "extracted_text",
+    "document_text",
+}
 
 
 def sanitize_metadata(meta: dict | None) -> dict | None:

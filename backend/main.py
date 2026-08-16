@@ -3,17 +3,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+import json
 import shutil
 import os
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from dotenv import load_dotenv
+load_dotenv()
+from sqlalchemy import func
 
 from database import engine, Base, SessionLocal, migrate_schema, seed_initial_users
-from models import Document, User, UserRole, DocumentShare, DocumentVersion, AuditLog
+from models import Document, User, UserRole, DocumentShare, DocumentVersion, AuditLog, DocumentVersionMetadata
 from sqlalchemy.exc import IntegrityError
 from blockchain import (
     register_document_on_chain,
     get_document_from_chain,
+    get_web3_and_contract,
     CONTRACT_ADDRESS,
     BlockchainUnavailableError,
     ContractUnavailableError,
@@ -31,6 +36,15 @@ from audit import (
     AuditResult,
     AuditResourceType,
     format_audit_event_response,
+)
+from ai_extractor import (
+    AIExtractor,
+    AIConfigurationError,
+    AITimeoutError,
+    AIParsingError,
+    AIServiceError,
+    DEFAULT_EMPTY_METADATA,
+    normalize_extracted_schema,
 )
 
 Base.metadata.create_all(bind=engine)
@@ -146,6 +160,198 @@ class DocumentAuditResponse(BaseModel):
 class SystemAuditResponse(BaseModel):
     total_count: int
     events: list[AuditLogItemResponse]
+
+
+class SystemOverviewStats(BaseModel):
+    total_documents: int
+    total_versions: int
+    total_file_size_bytes: int
+    total_users: int
+    users_by_role: dict[str, int]
+    total_active_shares: int
+    shared_documents_count: int
+
+
+class IntegrityOverviewStats(BaseModel):
+    verified_documents: int
+    tampered_documents: int
+    proof_unavailable_documents: int
+    attention_required_count: int
+
+
+class SecurityOverviewStats(BaseModel):
+    window_hours: int = 24
+    failed_logins_24h: int
+    failed_logins_all_time: int
+    access_denied_24h: int
+    access_denied_all_time: int
+    action_denied_24h: int
+    action_denied_all_time: int
+
+
+class BlockchainOverviewStats(BaseModel):
+    is_connected: bool
+    chain_id: int | None = None
+    network_name: str
+    contract_address: str
+    anchored_versions_count: int
+    pending_versions_count: int
+    latest_anchor_tx: str | None = None
+    latest_anchor_time: str | None = None
+
+
+class AttentionDocumentItem(BaseModel):
+    document_id: int
+    filename: str
+    case_number: str | None = None
+    version_number: int | None = None
+    issue_type: str  # "TAMPERED", "PROOF_UNAVAILABLE", "MISSING_FILE"
+    detected_at: str | None = None
+    reason: str | None = None
+
+
+class AdminDashboardResponse(BaseModel):
+    system_overview: SystemOverviewStats
+    integrity_overview: IntegrityOverviewStats
+    security_overview: SecurityOverviewStats
+    blockchain_overview: BlockchainOverviewStats
+    attention_documents: list[AttentionDocumentItem]
+    recent_activity: list[AuditLogItemResponse]
+    generated_at: str
+
+
+# --- AI Metadata Schemas ---
+
+class PartyItem(BaseModel):
+    name: str
+    role: str = "Party"
+
+
+class DateItem(BaseModel):
+    date: str
+    description: str = "Date"
+
+
+class ConfidenceSchema(BaseModel):
+    overall: float = 0.0
+    fields: dict[str, float] = {}
+
+
+class DocumentVersionMetadataResponse(BaseModel):
+    id: int | None = None
+    document_id: int
+    version_id: int | None = None
+    version_number: int
+    source_hash: str | None = None
+    status: str  # NOT_ANALYZED, COMPLETED, FAILED, EXTRACTION_UNAVAILABLE
+    document_type: str | None = None
+    case_number: str | None = None
+    court: str | None = None
+    jurisdiction: str | None = None
+    subject: str | None = None
+    parties: list[PartyItem] = []
+    dates: list[DateItem] = []
+    keywords: list[str] = []
+    confidence: ConfidenceSchema = ConfidenceSchema()
+    ai_provider: str | None = None
+    ai_model: str | None = None
+    extraction_duration_ms: int | None = None
+    error_message: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    cached: bool = False
+    is_owner_or_admin: bool = False
+
+
+def format_version_metadata_response(
+    meta: DocumentVersionMetadata | None,
+    document_id: int,
+    version_id: int | None,
+    version_number: int,
+    source_hash: str | None,
+    is_owner_or_admin: bool,
+    cached: bool = False,
+) -> dict:
+    if meta is None:
+        return {
+            "id": None,
+            "document_id": document_id,
+            "version_id": version_id,
+            "version_number": version_number,
+            "source_hash": source_hash,
+            "status": "NOT_ANALYZED",
+            "document_type": None,
+            "case_number": None,
+            "court": None,
+            "jurisdiction": None,
+            "subject": None,
+            "parties": [],
+            "dates": [],
+            "keywords": [],
+            "confidence": {"overall": 0.0, "fields": {}},
+            "ai_provider": None,
+            "ai_model": None,
+            "extraction_duration_ms": None,
+            "error_message": None,
+            "created_at": None,
+            "updated_at": None,
+            "cached": False,
+            "is_owner_or_admin": is_owner_or_admin,
+        }
+
+    parties = []
+    if meta.parties_json:
+        try:
+            parties = json.loads(meta.parties_json)
+        except Exception:
+            parties = []
+
+    dates = []
+    if meta.dates_json:
+        try:
+            dates = json.loads(meta.dates_json)
+        except Exception:
+            dates = []
+
+    keywords = []
+    if meta.keywords_json:
+        try:
+            keywords = json.loads(meta.keywords_json)
+        except Exception:
+            keywords = []
+
+    confidence = {"overall": 0.0, "fields": {}}
+    if meta.confidence_json:
+        try:
+            confidence = json.loads(meta.confidence_json)
+        except Exception:
+            confidence = {"overall": 0.0, "fields": {}}
+
+    return {
+        "id": meta.id,
+        "document_id": meta.document_id,
+        "version_id": meta.version_id,
+        "version_number": meta.version_number,
+        "source_hash": meta.source_hash,
+        "status": meta.status or "NOT_ANALYZED",
+        "document_type": meta.document_type,
+        "case_number": meta.case_number,
+        "court": meta.court,
+        "jurisdiction": meta.jurisdiction,
+        "subject": meta.subject,
+        "parties": parties,
+        "dates": dates,
+        "keywords": keywords,
+        "confidence": confidence,
+        "ai_provider": meta.ai_provider,
+        "ai_model": meta.ai_model,
+        "extraction_duration_ms": meta.extraction_duration_ms,
+        "error_message": meta.error_message,
+        "created_at": format_utc_iso(meta.created_at),
+        "updated_at": format_utc_iso(meta.updated_at),
+        "cached": cached,
+        "is_owner_or_admin": is_owner_or_admin,
+    }
 
 
 
@@ -1344,6 +1550,334 @@ def verify_document_version(
     }
 
 
+# --- AI Metadata Extraction & Query Endpoints ---
+
+@app.post("/documents/{document_id}/versions/{version_identifier}/metadata/extract", response_model=DocumentVersionMetadataResponse)
+def extract_document_version_metadata(
+    document_id: int,
+    version_identifier: str,
+    force: bool = False,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Triggers or returns cached AI-assisted structured legal metadata extraction for a specific document version.
+    - RBAC: Allowed only for Document Owner and Administrator.
+    - Shared Judges / Clients: Blocked with HTTP 403 (ACTION_DENIED).
+    - Caching: Returns cached COMPLETED metadata instantly for the immutable version SHA-256 hash unless force=True.
+    - Fault Isolation: AI errors do not affect the underlying document, version, SHA-256, or blockchain state.
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    # 1. Access Check: Must have access to the document
+    if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to access document #{document_id}",
+            metadata={"attempted_action": "EXTRACT_METADATA", "version_identifier": str(version_identifier)},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: You do not have permission to access document #{document_id}",
+        )
+
+    # 2. RBAC Guard: Only Owner or Admin can trigger extraction
+    if not check_document_ownership(document, current_user):
+        log_audit_event(
+            action=AuditEventType.ACTION_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason="Access forbidden: Only the document owner or an administrator can trigger AI metadata extraction.",
+            metadata={"attempted_action": "EXTRACT_METADATA", "version_identifier": str(version_identifier)},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: Only the document owner or an administrator can trigger AI metadata extraction.",
+        )
+
+    # 3. Locate exact DocumentVersion
+    version = find_document_version(document_id, version_identifier, db)
+    if not version:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Version '{version_identifier}' not found for document #{document_id}",
+        )
+
+    # 4. Check Cache (if force != True)
+    existing_meta = db.query(DocumentVersionMetadata).filter(
+        DocumentVersionMetadata.version_id == version.id
+    ).first()
+
+    if existing_meta and existing_meta.status == "COMPLETED" and existing_meta.source_hash == version.file_hash and not force:
+        return format_version_metadata_response(
+            existing_meta,
+            document_id=document.id,
+            version_id=version.id,
+            version_number=version.version_number,
+            source_hash=version.file_hash,
+            is_owner_or_admin=True,
+            cached=True,
+        )
+
+    # 5. Resolve File Path on disk
+    file_path = get_version_file_path(version, document)
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Stored document version file '{version.filename}' (v{version.version_number}) not found on disk",
+        )
+
+    # 6. Instantiate Extractor (Strictly validates provider configuration)
+    try:
+        extractor = AIExtractor()
+    except AIConfigurationError as e:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.AI_METADATA_EXTRACTION_FAILED,
+            result=AuditResult.FAILED,
+            actor=current_user,
+            document=document,
+            version=version,
+            version_number=version.version_number,
+            reason=str(e),
+            metadata={"status": "FAILED", "provider": "gemini"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "AI_CONFIGURATION_ERROR",
+                "message": str(e),
+            },
+        )
+
+    # 7. Process extraction synchronously
+    hint = {
+        "filename": version.filename,
+        "case_number": document.case_number,
+    }
+    metadata_dict, status_str, error_msg, duration_ms = extractor.process_document_version(
+        file_path=file_path,
+        file_type=version.file_type,
+        document_hint=hint,
+    )
+
+    # 8. Upsert DocumentVersionMetadata record
+    if not existing_meta:
+        existing_meta = DocumentVersionMetadata(
+            document_id=document.id,
+            version_id=version.id,
+            version_number=version.version_number,
+            source_hash=version.file_hash,
+            status=status_str,
+            ai_provider=extractor.provider_name,
+            ai_model=extractor.model_name,
+            extraction_duration_ms=duration_ms,
+            error_message=error_msg,
+        )
+        db.add(existing_meta)
+    else:
+        existing_meta.status = status_str
+        existing_meta.source_hash = version.file_hash
+        existing_meta.ai_provider = extractor.provider_name
+        existing_meta.ai_model = extractor.model_name
+        existing_meta.extraction_duration_ms = duration_ms
+        existing_meta.error_message = error_msg
+
+    if metadata_dict:
+        existing_meta.document_type = metadata_dict.get("document_type")
+        existing_meta.case_number = metadata_dict.get("case_number")
+        existing_meta.court = metadata_dict.get("court")
+        existing_meta.jurisdiction = metadata_dict.get("jurisdiction")
+        existing_meta.subject = metadata_dict.get("subject")
+        existing_meta.parties_json = json.dumps(metadata_dict.get("parties", []))
+        existing_meta.dates_json = json.dumps(metadata_dict.get("dates", []))
+        existing_meta.keywords_json = json.dumps(metadata_dict.get("keywords", []))
+        existing_meta.confidence_json = json.dumps(metadata_dict.get("confidence", {}))
+
+    db.commit()
+    db.refresh(existing_meta)
+
+    # 9. Audit Logging (Strictly sanitized, NO raw text)
+    if status_str == "COMPLETED":
+        field_count = sum(
+            1 for v in [
+                existing_meta.document_type,
+                existing_meta.case_number,
+                existing_meta.court,
+                existing_meta.jurisdiction,
+                existing_meta.subject,
+            ] if v
+        ) + (len(json.loads(existing_meta.parties_json)) if existing_meta.parties_json else 0) \
+          + (len(json.loads(existing_meta.dates_json)) if existing_meta.dates_json else 0)
+
+        log_audit_event(
+            db=db,
+            action=AuditEventType.AI_METADATA_EXTRACTED,
+            result=AuditResult.SUCCESS,
+            actor=current_user,
+            document=document,
+            version=version,
+            version_number=version.version_number,
+            metadata={
+                "provider": extractor.provider_name,
+                "model": extractor.model_name,
+                "duration_ms": duration_ms,
+                "fields_extracted": field_count,
+                "document_type": existing_meta.document_type,
+                "cached": False,
+            },
+        )
+    else:
+        audit_res = AuditResult.UNAVAILABLE if status_str == "EXTRACTION_UNAVAILABLE" else AuditResult.FAILED
+        log_audit_event(
+            db=db,
+            action=AuditEventType.AI_METADATA_EXTRACTION_FAILED,
+            result=audit_res,
+            actor=current_user,
+            document=document,
+            version=version,
+            version_number=version.version_number,
+            reason=error_msg,
+            metadata={
+                "provider": extractor.provider_name,
+                "model": extractor.model_name,
+                "duration_ms": duration_ms,
+                "status": status_str,
+            },
+        )
+
+    return format_version_metadata_response(
+        existing_meta,
+        document_id=document.id,
+        version_id=version.id,
+        version_number=version.version_number,
+        source_hash=version.file_hash,
+        is_owner_or_admin=True,
+        cached=False,
+    )
+
+
+@app.get("/documents/{document_id}/versions/{version_identifier}/metadata", response_model=DocumentVersionMetadataResponse)
+def get_document_version_metadata(
+    document_id: int,
+    version_identifier: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Retrieves existing AI-extracted metadata for a specific document version."""
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to view metadata for document #{document_id}",
+            metadata={"attempted_action": "GET_VERSION_METADATA", "version_identifier": str(version_identifier)},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: You do not have permission to view metadata for document #{document_id}",
+        )
+
+    version = find_document_version(document_id, version_identifier, db)
+    if not version:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Version '{version_identifier}' not found for document #{document_id}",
+        )
+
+    is_owner_or_admin = check_document_ownership(document, current_user)
+    meta = db.query(DocumentVersionMetadata).filter(
+        DocumentVersionMetadata.version_id == version.id
+    ).first()
+
+    return format_version_metadata_response(
+        meta,
+        document_id=document.id,
+        version_id=version.id,
+        version_number=version.version_number,
+        source_hash=version.file_hash,
+        is_owner_or_admin=is_owner_or_admin,
+        cached=False,
+    )
+
+
+@app.get("/documents/{document_id}/metadata", response_model=DocumentVersionMetadataResponse)
+def get_document_master_metadata(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Retrieves existing AI-extracted metadata for the current master version of a document."""
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to view metadata for document #{document_id}",
+            metadata={"attempted_action": "GET_DOCUMENT_METADATA"},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: You do not have permission to view metadata for document #{document_id}",
+        )
+
+    is_owner_or_admin = check_document_ownership(document, current_user)
+    version = find_document_version(document_id, document.version or 1, db)
+    if not version:
+        return format_version_metadata_response(
+            None,
+            document_id=document.id,
+            version_id=None,
+            version_number=document.version or 1,
+            source_hash=document.file_hash,
+            is_owner_or_admin=is_owner_or_admin,
+            cached=False,
+        )
+
+    meta = db.query(DocumentVersionMetadata).filter(
+        DocumentVersionMetadata.version_id == version.id
+    ).first()
+
+    return format_version_metadata_response(
+        meta,
+        document_id=document.id,
+        version_id=version.id,
+        version_number=version.version_number,
+        source_hash=version.file_hash,
+        is_owner_or_admin=is_owner_or_admin,
+        cached=False,
+    )
+
+
 @app.post("/documents/{document_id}/verify")
 def verify_document(
     document_id: int,
@@ -1740,7 +2274,9 @@ def dev_reset_vault(
             detail="Development vault reset is strictly forbidden when LEGALVAULT_ENV is set to production.",
         )
 
-    # 1. Delete document versions and shares first (maintains foreign key integrity)
+    # 1. Delete document metadata, versions, and shares first (maintains foreign key integrity)
+    meta_count = db.query(DocumentVersionMetadata).count()
+    db.query(DocumentVersionMetadata).delete()
     versions_count = db.query(DocumentVersion).count()
     db.query(DocumentVersion).delete()
     shares_count = db.query(DocumentShare).count()
@@ -1779,6 +2315,7 @@ def dev_reset_vault(
             "documents_deleted": docs_count,
             "versions_deleted": versions_count,
             "shares_deleted": shares_count,
+            "metadata_deleted": meta_count,
             "files_deleted": files_deleted,
         },
     )
@@ -1898,3 +2435,283 @@ def get_system_audit_trail(
         "total_count": total_count,
         "events": formatted_events,
     }
+
+
+# --- Admin Dashboard Overview Endpoint ---
+
+@app.get("/admin/dashboard", response_model=AdminDashboardResponse)
+def get_admin_dashboard(
+    current_user: User = Depends(require_roles(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """
+    Centralized administrative and forensic overview endpoint.
+    - Strictly restricted to ADMIN role.
+    - Performs server-side SQL aggregation across users, documents, versions, shares, audit events, and blockchain health.
+    - Correctly calculates current integrity state based on the latest authoritative verification outcome per document.
+    - Sanitizes blockchain info (no private keys or full RPC URLs exposed).
+    """
+    # 1. System Overview Metrics
+    total_docs = db.query(Document).count()
+    total_versions = db.query(DocumentVersion).count()
+    total_size = db.query(func.coalesce(func.sum(DocumentVersion.file_size), 0)).scalar() or 0
+    total_users = db.query(User).count()
+
+    role_counts = {r: 0 for r in UserRole.ALL}
+    for r, cnt in db.query(User.role, func.count(User.id)).group_by(User.role).all():
+        role_counts[r] = cnt
+
+    total_shares = db.query(DocumentShare).count()
+    shared_docs_count = db.query(func.count(func.distinct(DocumentShare.document_id))).scalar() or 0
+
+    system_overview = SystemOverviewStats(
+        total_documents=total_docs,
+        total_versions=total_versions,
+        total_file_size_bytes=int(total_size),
+        total_users=total_users,
+        users_by_role=role_counts,
+        total_active_shares=total_shares,
+        shared_documents_count=int(shared_docs_count),
+    )
+
+    # 2. Authoritative Current Integrity State & Attention Documents
+    # Query verification events in chronological order to find the latest state per document / version
+    verification_actions = [
+        AuditEventType.DOCUMENT_VERIFIED,
+        AuditEventType.VERSION_VERIFIED,
+        AuditEventType.DOCUMENT_TAMPERED,
+        AuditEventType.VERSION_TAMPERED,
+        AuditEventType.BLOCKCHAIN_PROOF_UNAVAILABLE,
+    ]
+
+    all_ver_logs = (
+        db.query(AuditLog)
+        .filter(AuditLog.action.in_(verification_actions))
+        .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+        .all()
+    )
+
+    # Map: document_id -> latest verification event
+    # Map: (document_id, version_number) -> latest verification event
+    latest_doc_ver_events: dict[int, AuditLog] = {}
+    latest_version_events: dict[tuple[int, int], AuditLog] = {}
+
+    for log in all_ver_logs:
+        if log.document_id is not None:
+            latest_doc_ver_events[log.document_id] = log
+            if log.version_number is not None:
+                latest_version_events[(log.document_id, log.version_number)] = log
+
+    # Check all existing documents and their versions
+    all_documents = db.query(Document).all()
+    verified_doc_ids = set()
+    tampered_doc_ids = set()
+    proof_unavail_doc_ids = set()
+    attention_docs_list: list[AttentionDocumentItem] = []
+
+    for doc in all_documents:
+        doc_has_tamper = False
+        doc_has_unavail = False
+        doc_has_missing_file = False
+        doc_has_verified = False
+
+        versions = db.query(DocumentVersion).filter(DocumentVersion.document_id == doc.id).all()
+
+        # Check version by version
+        for v in versions:
+            v_file_path = os.path.join(UPLOAD_DIR, v.stored_filename) if v.stored_filename else None
+            if not v_file_path or not os.path.exists(v_file_path):
+                doc_has_missing_file = True
+                attention_docs_list.append(
+                    AttentionDocumentItem(
+                        document_id=doc.id,
+                        filename=v.filename or doc.filename,
+                        case_number=doc.case_number,
+                        version_number=v.version_number,
+                        issue_type="MISSING_FILE",
+                        detected_at=format_utc_iso(v.created_at),
+                        reason=f"Stored off-chain file '{v.stored_filename}' missing on disk",
+                    )
+                )
+                continue
+
+            # Look up latest version-specific verification
+            v_latest = latest_version_events.get((doc.id, v.version_number))
+            if v_latest:
+                if v_latest.result == AuditResult.TAMPERED or v_latest.action in [
+                    AuditEventType.VERSION_TAMPERED,
+                    AuditEventType.DOCUMENT_TAMPERED,
+                ]:
+                    doc_has_tamper = True
+                    attention_docs_list.append(
+                        AttentionDocumentItem(
+                            document_id=doc.id,
+                            filename=v.filename or doc.filename,
+                            case_number=doc.case_number,
+                            version_number=v.version_number,
+                            issue_type="TAMPERED",
+                            detected_at=format_utc_iso(v_latest.created_at),
+                            reason=v_latest.reason or "Cryptographic SHA-256 hash mismatch detected against blockchain anchor",
+                        )
+                    )
+                elif v_latest.result == AuditResult.UNAVAILABLE or v_latest.action == AuditEventType.BLOCKCHAIN_PROOF_UNAVAILABLE:
+                    doc_has_unavail = True
+                    attention_docs_list.append(
+                        AttentionDocumentItem(
+                            document_id=doc.id,
+                            filename=v.filename or doc.filename,
+                            case_number=doc.case_number,
+                            version_number=v.version_number,
+                            issue_type="PROOF_UNAVAILABLE",
+                            detected_at=format_utc_iso(v_latest.created_at),
+                            reason=v_latest.reason or "Blockchain proof missing or smart contract record unreachable",
+                        )
+                    )
+                elif v_latest.result in [AuditResult.VERIFIED, AuditResult.SUCCESS]:
+                    doc_has_verified = True
+
+        # If document had a whole-document verification that was latest and not captured by versions
+        if not versions and doc.id in latest_doc_ver_events:
+            doc_latest = latest_doc_ver_events[doc.id]
+            if doc_latest.result == AuditResult.TAMPERED:
+                doc_has_tamper = True
+                attention_docs_list.append(
+                    AttentionDocumentItem(
+                        document_id=doc.id,
+                        filename=doc.filename,
+                        case_number=doc.case_number,
+                        version_number=doc.version or 1,
+                        issue_type="TAMPERED",
+                        detected_at=format_utc_iso(doc_latest.created_at),
+                        reason=doc_latest.reason or "Master document integrity check failed",
+                    )
+                )
+            elif doc_latest.result == AuditResult.UNAVAILABLE:
+                doc_has_unavail = True
+                attention_docs_list.append(
+                    AttentionDocumentItem(
+                        document_id=doc.id,
+                        filename=doc.filename,
+                        case_number=doc.case_number,
+                        version_number=doc.version or 1,
+                        issue_type="PROOF_UNAVAILABLE",
+                        detected_at=format_utc_iso(doc_latest.created_at),
+                        reason=doc_latest.reason or "Proof unavailable",
+                    )
+                )
+            elif doc_latest.result in [AuditResult.VERIFIED, AuditResult.SUCCESS]:
+                doc_has_verified = True
+
+        # Categorize unique document
+        if doc_has_tamper or doc_has_missing_file:
+            tampered_doc_ids.add(doc.id)
+        elif doc_has_unavail:
+            proof_unavail_doc_ids.add(doc.id)
+        elif doc_has_verified:
+            verified_doc_ids.add(doc.id)
+
+    integrity_overview = IntegrityOverviewStats(
+        verified_documents=len(verified_doc_ids),
+        tampered_documents=len(tampered_doc_ids),
+        proof_unavailable_documents=len(proof_unavail_doc_ids),
+        attention_required_count=len(attention_docs_list),
+    )
+
+    # 3. Security Threat Overview (24h Window & All-Time)
+    cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+
+    failed_logins_all = db.query(AuditLog).filter(AuditLog.action == AuditEventType.LOGIN_FAILED).count()
+    failed_logins_24h = (
+        db.query(AuditLog)
+        .filter(AuditLog.action == AuditEventType.LOGIN_FAILED, AuditLog.created_at >= cutoff_24h)
+        .count()
+    )
+
+    access_denied_all = db.query(AuditLog).filter(AuditLog.action == AuditEventType.ACCESS_DENIED).count()
+    access_denied_24h = (
+        db.query(AuditLog)
+        .filter(AuditLog.action == AuditEventType.ACCESS_DENIED, AuditLog.created_at >= cutoff_24h)
+        .count()
+    )
+
+    action_denied_all = db.query(AuditLog).filter(AuditLog.action == AuditEventType.ACTION_DENIED).count()
+    action_denied_24h = (
+        db.query(AuditLog)
+        .filter(AuditLog.action == AuditEventType.ACTION_DENIED, AuditLog.created_at >= cutoff_24h)
+        .count()
+    )
+
+    security_overview = SecurityOverviewStats(
+        window_hours=24,
+        failed_logins_24h=failed_logins_24h,
+        failed_logins_all_time=failed_logins_all,
+        access_denied_24h=access_denied_24h,
+        access_denied_all_time=access_denied_all,
+        action_denied_24h=action_denied_24h,
+        action_denied_all_time=action_denied_all,
+    )
+
+    # 4. Blockchain & Custody Overview
+    is_connected = False
+    chain_id = None
+    network_name = "Local EVM"
+    try:
+        w3, contract = get_web3_and_contract()
+        is_connected = w3.is_connected()
+        if is_connected:
+            chain_id = w3.eth.chain_id
+            if chain_id == 31337 or chain_id == 1337:
+                network_name = "Local Hardhat / Anvil EVM"
+            elif chain_id == 11155111:
+                network_name = "Ethereum Sepolia Testnet"
+            elif chain_id == 1:
+                network_name = "Ethereum Mainnet"
+            else:
+                network_name = f"EVM Chain (ID: {chain_id})"
+    except Exception:
+        is_connected = False
+        chain_id = None
+        network_name = "Offline / Unreachable"
+
+    anchored_versions_count = (
+        db.query(DocumentVersion).filter(DocumentVersion.blockchain_status == "confirmed").count()
+    )
+    pending_versions_count = (
+        db.query(DocumentVersion)
+        .filter((DocumentVersion.blockchain_status != "confirmed") | (DocumentVersion.blockchain_status == None))
+        .count()
+    )
+
+    latest_ver = (
+        db.query(DocumentVersion)
+        .filter(DocumentVersion.blockchain_status == "confirmed")
+        .order_by(DocumentVersion.created_at.desc())
+        .first()
+    )
+    latest_anchor_tx = latest_ver.blockchain_tx_hash if latest_ver else None
+    latest_anchor_time = format_utc_iso(latest_ver.created_at) if latest_ver else None
+
+    blockchain_overview = BlockchainOverviewStats(
+        is_connected=is_connected,
+        chain_id=chain_id,
+        network_name=network_name,
+        contract_address=CONTRACT_ADDRESS,
+        anchored_versions_count=anchored_versions_count,
+        pending_versions_count=pending_versions_count,
+        latest_anchor_tx=latest_anchor_tx,
+        latest_anchor_time=latest_anchor_time,
+    )
+
+    # 5. Recent Activity (Recent 10 Events)
+    recent_logs = db.query(AuditLog).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(10).all()
+    recent_activity = [format_audit_event_response(e, is_system_view=True) for e in recent_logs]
+
+    return AdminDashboardResponse(
+        system_overview=system_overview,
+        integrity_overview=integrity_overview,
+        security_overview=security_overview,
+        blockchain_overview=blockchain_overview,
+        attention_documents=attention_docs_list,
+        recent_activity=recent_activity,
+        generated_at=format_utc_iso(datetime.now(timezone.utc)),
+    )

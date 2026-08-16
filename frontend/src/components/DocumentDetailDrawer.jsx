@@ -8,6 +8,8 @@ import {
   uploadDocumentVersion,
   downloadVersionFile,
   fetchDocumentAuditTrail,
+  extractVersionMetadata,
+  fetchVersionMetadata,
 } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { getVersionIntegrity } from '../utils/integrity';
@@ -28,6 +30,13 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
   const [revokingShareId, setRevokingShareId] = useState(null);
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadingVersionNum, setDownloadingVersionNum] = useState(null);
+
+  // AI Metadata State
+  const [selectedMetaVersion, setSelectedMetaVersion] = useState(1);
+  const [metadataMap, setMetadataMap] = useState({});
+  const [loadingMetaVer, setLoadingMetaVer] = useState(null);
+  const [extractingMetaVer, setExtractingMetaVer] = useState(null);
+  const [metaError, setMetaError] = useState(null);
 
   // Audit Trail State
   const [auditEvents, setAuditEvents] = useState([]);
@@ -55,6 +64,36 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
     setRevisionSubmitting(false);
     setIsHashingRevision(false);
   }, []);
+
+  const loadVersionMetadata = useCallback(async (versionNum) => {
+    if (!documentId || !versionNum) return;
+    setLoadingMetaVer(versionNum);
+    setMetaError(null);
+    try {
+      const data = await fetchVersionMetadata(documentId, versionNum);
+      setMetadataMap((prev) => ({ ...prev, [versionNum]: data }));
+    } catch (err) {
+      console.warn(`Failed to load AI metadata for v${versionNum}:`, err);
+    } finally {
+      setLoadingMetaVer(null);
+    }
+  }, [documentId]);
+
+  const handleExtractMetadata = async (versionNum, force = false) => {
+    if (!documentId || !versionNum) return;
+    setExtractingMetaVer(versionNum);
+    setMetaError(null);
+    try {
+      const data = await extractVersionMetadata(documentId, versionNum, force);
+      setMetadataMap((prev) => ({ ...prev, [versionNum]: data }));
+      // Refresh audit trail
+      loadAuditTrail();
+    } catch (err) {
+      setMetaError(err.message || 'AI metadata extraction failed.');
+    } finally {
+      setExtractingMetaVer(null);
+    }
+  };
 
   const loadAuditTrail = useCallback(async (actionFilter = auditActionFilter, versionFilter = auditVersionFilter) => {
     if (!documentId) return;
@@ -85,6 +124,9 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
       const data = await fetchDocumentDetail(documentId);
       setDoc(data);
 
+      const activeVer = data.version || 1;
+      setSelectedMetaVersion(activeVer);
+
       // Load Version History
       try {
         const vList = await fetchDocumentVersions(documentId);
@@ -92,6 +134,14 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
       } catch (err) {
         console.warn('Failed to load version history:', err);
         setVersions([]);
+      }
+
+      // Load AI Metadata for the active version
+      try {
+        const metaData = await fetchVersionMetadata(documentId, activeVer);
+        setMetadataMap((prev) => ({ ...prev, [activeVer]: metaData }));
+      } catch (err) {
+        console.warn('Failed to load active version AI metadata:', err);
       }
 
       // If owner or admin, load active shares
@@ -136,6 +186,10 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
       setError(null);
       setIsUploadRevisionOpen(false);
       resetRevisionForm();
+      setMetadataMap({});
+      setMetaError(null);
+      setExtractingMetaVer(null);
+      setLoadingMetaVer(null);
     }
   }, [isOpen, documentId, loadDetail, resetRevisionForm]);
 
@@ -186,6 +240,10 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
       case 'ACCESS_DENIED':
       case 'ACTION_DENIED':
         return { backgroundColor: '#FFF1F2', color: '#BE123C', border: '1px solid #FECDD3' };
+      case 'AI_METADATA_EXTRACTED':
+        return { backgroundColor: '#F5F3FF', color: '#6D28D9', border: '1px solid #DDD6FE' };
+      case 'AI_METADATA_EXTRACTION_FAILED':
+        return { backgroundColor: '#FEF2F2', color: '#B91C1C', border: '1px solid #FECACA' };
       default:
         return { backgroundColor: '#F1F5F9', color: '#334155', border: '1px solid #CBD5E1' };
     }
@@ -434,6 +492,292 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
                 </div>
               </div>
 
+              {/* AI-Extracted Legal Metadata Section */}
+              <div style={{ backgroundColor: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 'var(--radius-sm)', padding: '1.15rem 1.25rem', marginBottom: '1.5rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.65rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                    <span className="serif-heading" style={{ fontSize: '1rem', color: 'var(--accent-navy)', margin: 0 }}>
+                      AI-Extracted Legal Metadata
+                    </span>
+                    <span className="badge" style={{ backgroundColor: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE', fontSize: '0.7rem', fontWeight: 600 }}>
+                      v{selectedMetaVersion} {selectedMetaVersion === (doc.version || 1) ? '(Current)' : ''}
+                    </span>
+                    <span className="badge" style={{ backgroundColor: '#FEF3C7', color: '#92400E', border: '1px solid #FDE68A', fontSize: '0.65rem', fontWeight: 600 }}>
+                      Informational · Non-Authoritative
+                    </span>
+                  </div>
+
+                  {/* Version switcher pills if multiple versions exist */}
+                  {versions.length > 1 && (
+                    <div style={{ display: 'flex', gap: '0.3rem', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.72rem', color: 'var(--ink-muted)' }}>Version:</span>
+                      {versions.map((v) => (
+                        <button
+                          key={v.version_number}
+                          type="button"
+                          className={`btn btn-sm ${selectedMetaVersion === v.version_number ? 'btn-primary' : 'btn-ghost'}`}
+                          style={{
+                            fontSize: '0.68rem',
+                            padding: '0.15rem 0.45rem',
+                            minWidth: '2rem',
+                          }}
+                          onClick={() => {
+                            setSelectedMetaVersion(v.version_number);
+                            if (!metadataMap[v.version_number]) {
+                              loadVersionMetadata(v.version_number);
+                            }
+                          }}
+                        >
+                          v{v.version_number}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Explicit Disclaimer Notice */}
+                <div style={{ fontSize: '0.74rem', color: 'var(--ink-secondary)', backgroundColor: '#FFFFFF', border: '1px solid #E2E8F0', padding: '0.45rem 0.65rem', borderRadius: 'var(--radius-xs)', marginBottom: '0.85rem' }}>
+                  ℹ <strong>Evidentiary Notice:</strong> AI metadata is an analytical extraction for categorization. It does <em>not</em> constitute legal verification or replace cryptographic blockchain provenance.
+                </div>
+
+                {metaError && (
+                  <div className="verdict-banner tampered" style={{ marginBottom: '0.85rem', padding: '0.55rem 0.75rem' }}>
+                    <div className="verdict-explanation" style={{ margin: 0, fontSize: '0.78rem' }}>
+                      {metaError}
+                    </div>
+                  </div>
+                )}
+
+                {/* Loading / Extracting State */}
+                {extractingMetaVer === selectedMetaVersion || loadingMetaVer === selectedMetaVersion ? (
+                  <div style={{ textAlign: 'center', padding: '1.75rem 1rem', backgroundColor: '#FFFFFF', borderRadius: 'var(--radius-xs)', border: '1px solid #E2E8F0' }}>
+                    <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--accent-navy)', marginBottom: '0.25rem' }}>
+                      {extractingMetaVer === selectedMetaVersion ? 'Analyzing Document Text with AI Model...' : 'Retrieving Metadata for Version...'}
+                    </div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
+                      Extracting legal entities, case citations, court details, parties, and dates.
+                    </div>
+                  </div>
+                ) : (() => {
+                  const currentMeta = metadataMap[selectedMetaVersion];
+                  const status = currentMeta?.status || 'NOT_ANALYZED';
+
+                  if (status === 'NOT_ANALYZED') {
+                    return (
+                      <div style={{ textAlign: 'center', padding: '1.25rem 1rem', backgroundColor: '#FFFFFF', borderRadius: 'var(--radius-xs)', border: '1px dashed #CBD5E1' }}>
+                        <div style={{ fontSize: '0.82rem', color: 'var(--ink-secondary)', marginBottom: '0.75rem' }}>
+                          No AI metadata has been extracted for <strong>Version {selectedMetaVersion}</strong> yet.
+                        </div>
+                        {canManageDoc ? (
+                          <button
+                            type="button"
+                            className="btn btn-primary btn-sm"
+                            style={{ fontSize: '0.78rem' }}
+                            onClick={() => handleExtractMetadata(selectedMetaVersion, false)}
+                          >
+                            ✨ Extract Legal Metadata
+                          </button>
+                        ) : (
+                          <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)', fontStyle: 'italic' }}>
+                            AI metadata extraction must be initiated by the document depositor or vault administrator.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  if (status === 'EXTRACTION_UNAVAILABLE') {
+                    return (
+                      <div style={{ backgroundColor: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 'var(--radius-xs)', padding: '0.85rem 1rem' }}>
+                        <div style={{ fontWeight: 700, fontSize: '0.82rem', color: '#92400E', marginBottom: '0.25rem' }}>
+                          ⚠ TEXT EXTRACTION UNAVAILABLE
+                        </div>
+                        <div style={{ fontSize: '0.78rem', color: '#78350F', marginBottom: '0.65rem' }}>
+                          {currentMeta?.error_message || 'Document contains insufficient extractable text or appears to be a scanned image-only PDF. OCR is not enabled for this vault instance.'}
+                        </div>
+                        {canManageDoc && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ fontSize: '0.72rem', backgroundColor: '#FFFFFF' }}
+                            onClick={() => handleExtractMetadata(selectedMetaVersion, true)}
+                          >
+                            ↻ Retry Analysis
+                          </button>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  if (status === 'FAILED') {
+                    return (
+                      <div style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 'var(--radius-xs)', padding: '0.85rem 1rem' }}>
+                        <div style={{ fontWeight: 700, fontSize: '0.82rem', color: '#B91C1C', marginBottom: '0.25rem' }}>
+                          ⚠ METADATA EXTRACTION FAILED
+                        </div>
+                        <div style={{ fontSize: '0.78rem', color: '#991B1B', marginBottom: '0.65rem' }}>
+                          {currentMeta?.error_message || 'An error occurred while communicating with the AI service.'}
+                        </div>
+                        {canManageDoc && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ fontSize: '0.72rem', backgroundColor: '#FFFFFF' }}
+                            onClick={() => handleExtractMetadata(selectedMetaVersion, true)}
+                          >
+                            ↻ Retry Extraction
+                          </button>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  // Status is COMPLETED
+                  const conf = currentMeta?.confidence || { overall: 0.0, fields: {} };
+                  const confPct = Math.round((conf.overall || 0) * 100);
+                  const getConfBadge = (val) => {
+                    const pct = Math.round((val || 0) * 100);
+                    if (pct >= 85) return { bg: '#ECFDF5', text: '#047857', border: '#A7F3D0', label: `High (${pct}%)` };
+                    if (pct >= 60) return { bg: '#FEF3C7', text: '#92400E', border: '#FCD34D', label: `Medium (${pct}%)` };
+                    return { bg: '#FEF2F2', text: '#B91C1C', border: '#FECACA', label: `Low (${pct}%)` };
+                  };
+                  const overallBadge = getConfBadge(conf.overall);
+
+                  return (
+                    <div style={{ backgroundColor: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: 'var(--radius-xs)', padding: '1rem' }}>
+                      {/* Top Grid: Type, Confidence, Case Number, Court */}
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem', marginBottom: '0.85rem' }}>
+                        <div>
+                          <div className="stat-label">Document Type</div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.15rem' }}>
+                            <span style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--accent-navy)' }}>
+                              {currentMeta.document_type || 'Unspecified Legal Document'}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="stat-label">AI Extraction Confidence</div>
+                          <div style={{ marginTop: '0.15rem' }}>
+                            <span className="badge" style={{ backgroundColor: overallBadge.bg, color: overallBadge.text, border: `1px solid ${overallBadge.border}`, fontWeight: 700, fontSize: '0.72rem' }}>
+                              ● {overallBadge.label}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="stat-label">Identified Case Number</div>
+                          <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--ink-primary)', marginTop: '0.15rem', fontFamily: 'var(--font-mono)' }}>
+                            {currentMeta.case_number || 'Not Detected in Text'}
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="stat-label">Court / Forum</div>
+                          <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--ink-primary)', marginTop: '0.15rem' }}>
+                            {currentMeta.court || 'Not Specified'}
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="stat-label">Jurisdiction</div>
+                          <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--ink-primary)', marginTop: '0.15rem' }}>
+                            {currentMeta.jurisdiction || 'Not Specified'}
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="stat-label">Legal Subject Matter</div>
+                          <div style={{ fontSize: '0.82rem', color: 'var(--ink-primary)', marginTop: '0.15rem', lineHeight: 1.35 }}>
+                            {currentMeta.subject || 'Not Specified'}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Parties Section */}
+                      {currentMeta.parties && currentMeta.parties.length > 0 && (
+                        <div style={{ borderTop: '1px solid #F1F5F9', paddingTop: '0.65rem', marginBottom: '0.75rem' }}>
+                          <div className="stat-label" style={{ marginBottom: '0.35rem' }}>
+                            Identified Parties ({currentMeta.parties.length})
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                            {currentMeta.parties.map((p, pIdx) => (
+                              <div key={pIdx} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.78rem' }}>
+                                <span className="badge" style={{ backgroundColor: '#EEF2FF', color: '#4338CA', border: '1px solid #C7D2FE', fontSize: '0.68rem', fontWeight: 600, padding: '0.1rem 0.4rem' }}>
+                                  {p.role || 'Party'}
+                                </span>
+                                <strong style={{ color: 'var(--ink-primary)' }}>{p.name}</strong>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Important Dates Section */}
+                      {currentMeta.dates && currentMeta.dates.length > 0 && (
+                        <div style={{ borderTop: '1px solid #F1F5F9', paddingTop: '0.65rem', marginBottom: '0.75rem' }}>
+                          <div className="stat-label" style={{ marginBottom: '0.35rem' }}>
+                            Key Dates Extracted ({currentMeta.dates.length})
+                          </div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                            {currentMeta.dates.map((d, dIdx) => (
+                              <div key={dIdx} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', backgroundColor: '#F8FAFC', border: '1px solid #E2E8F0', padding: '0.2rem 0.55rem', borderRadius: 'var(--radius-xs)', fontSize: '0.75rem' }}>
+                                <span style={{ color: 'var(--ink-muted)' }}>{d.description}:</span>
+                                <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--accent-navy)' }}>{d.date}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Keywords Tags */}
+                      {currentMeta.keywords && currentMeta.keywords.length > 0 && (
+                        <div style={{ borderTop: '1px solid #F1F5F9', paddingTop: '0.65rem', marginBottom: '0.75rem' }}>
+                          <div className="stat-label" style={{ marginBottom: '0.35rem' }}>Relevant Keywords</div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                            {currentMeta.keywords.map((kw, kwIdx) => (
+                              <span key={kwIdx} className="badge" style={{ backgroundColor: '#F1F5F9', color: '#334155', border: '1px solid #CBD5E1', fontSize: '0.68rem', padding: '0.1rem 0.45rem' }}>
+                                #{kw}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Metadata Footer: Provider, Duration, IST Timestamp, Re-analyze Action */}
+                      <div style={{ borderTop: '1px solid #F1F5F9', paddingTop: '0.65rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--ink-muted)' }}>
+                          {currentMeta.ai_provider === 'mock' ? (
+                            <span>Provider: <strong>Mock (offline heuristics)</strong></span>
+                          ) : (
+                            <span>Provider: <strong>Google Gemini</strong> · {currentMeta.ai_model || 'gemini-2.0-flash'}</span>
+                          )}
+                          {currentMeta.extraction_duration_ms && (
+                            <span> · {currentMeta.extraction_duration_ms} ms</span>
+                          )}
+                          {currentMeta.updated_at && (
+                            <span> · {formatDate(currentMeta.updated_at)}</span>
+                          )}
+                        </div>
+
+                        {canManageDoc && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ fontSize: '0.72rem', padding: '0.2rem 0.55rem' }}
+                            onClick={() => handleExtractMetadata(selectedMetaVersion, true)}
+                            disabled={extractingMetaVer === selectedMetaVersion}
+                            title="Force re-extraction of AI metadata for this revision"
+                          >
+                            ↻ Re-analyze Version
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
               {/* Revision Upload Form Modal Overlay */}
               {isUploadRevisionOpen && (
                 <div style={{ backgroundColor: '#F8FAFC', border: '1px solid #CBD5E1', borderRadius: 'var(--radius-sm)', padding: '1.25rem', marginBottom: '1.5rem' }}>
@@ -638,6 +982,27 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
                             </div>
 
                             <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                style={{
+                                  fontSize: '0.72rem',
+                                  padding: '0.2rem 0.5rem',
+                                  backgroundColor: selectedMetaVersion === v.version_number ? '#EEF2FF' : 'transparent',
+                                  color: selectedMetaVersion === v.version_number ? '#4338CA' : 'var(--ink-secondary)',
+                                  borderColor: selectedMetaVersion === v.version_number ? '#C7D2FE' : 'var(--border-color)',
+                                }}
+                                onClick={() => {
+                                  setSelectedMetaVersion(v.version_number);
+                                  if (!metadataMap[v.version_number]) {
+                                    loadVersionMetadata(v.version_number);
+                                  }
+                                }}
+                                title="Inspect AI-extracted metadata for this revision"
+                              >
+                                🤖 AI Metadata
+                              </button>
+
                               <button
                                 type="button"
                                 className="btn btn-ghost btn-sm"
@@ -901,6 +1266,8 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
                       <option value="DOCUMENT_SHARE_REVOKED">Share Revoked</option>
                       <option value="DOCUMENT_DOWNLOADED">Downloaded</option>
                       <option value="DOCUMENT_VIEWED">Viewed</option>
+                      <option value="AI_METADATA_EXTRACTED">AI Metadata Extracted</option>
+                      <option value="AI_METADATA_EXTRACTION_FAILED">AI Extraction Failed</option>
                       <option value="ACCESS_DENIED">Access Denied</option>
                     </select>
 

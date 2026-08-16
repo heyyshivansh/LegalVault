@@ -414,4 +414,72 @@ export async function fetchSystemAuditTrail(params = {}) {
   return await res.json();
 }
 
+export async function fetchAdminDashboard() {
+  const res = await fetch(`${API_BASE}/admin/dashboard`, {
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to fetch admin dashboard data`);
+  }
+
+  return await res.json();
+}
+
+// --- AI Metadata API Functions ---
+
+export async function extractVersionMetadata(documentId, versionIdentifier, force = false) {
+  const url = `${API_BASE}/documents/${documentId}/versions/${versionIdentifier}/metadata/extract?force=${force ? 'true' : 'false'}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const errorMsg = typeof err.detail === 'string' ? err.detail : err.detail?.message || `AI metadata extraction failed with status ${res.status}`;
+    const errorObj = new Error(errorMsg);
+    errorObj.status = res.status;
+    errorObj.data = err.detail || err;
+    throw errorObj;
+  }
+
+  return await res.json();
+}
+
+export async function fetchVersionMetadata(documentId, versionIdentifier) {
+  const res = await fetch(`${API_BASE}/documents/${documentId}/versions/${versionIdentifier}/metadata`, {
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to fetch metadata for Version ${versionIdentifier}`);
+  }
+
+  return await res.json();
+}
+
+export async function fetchDocumentMetadata(documentId) {
+  const res = await fetch(`${API_BASE}/documents/${documentId}/metadata`, {
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to fetch metadata for document #${documentId}`);
+  }
+
+  return await res.json();
+}
+
 

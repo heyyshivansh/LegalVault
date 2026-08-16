@@ -104,6 +104,8 @@ def run_tests():
     try:
         db_path = os.path.join(os.path.dirname(__file__), "legalvault.db")
         conn = sqlite3.connect(db_path)
+        conn.execute("DELETE FROM document_version_metadata WHERE document_id IN (?, ?)", (doc_a_id, tamper_doc_id))
+        conn.execute("DELETE FROM document_versions WHERE document_id IN (?, ?)", (doc_a_id, tamper_doc_id))
         conn.execute("DELETE FROM documents WHERE id IN (?, ?)", (doc_a_id, tamper_doc_id))
         conn.commit()
         conn.close()

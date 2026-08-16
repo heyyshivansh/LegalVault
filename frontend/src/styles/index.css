@@ -1042,6 +1042,65 @@ h1, h2, h3, .serif-heading {
 }
 
 /* ==========================================================================
+   ADMINISTRATIVE DASHBOARD STYLES
+   ========================================================================== */
+
+.admin-dashboard-container {
+  width: 100%;
+  box-sizing: border-box;
+  animation: loginCardEnter 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.dashboard-header-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius-sm);
+  box-sizing: border-box;
+}
+
+.dashboard-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1.25rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.dashboard-card {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 1.25rem;
+  width: 100%;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease;
+}
+
+.dashboard-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+@media (max-width: 960px) {
+  .dashboard-grid-2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ==========================================================================
    ACCESSIBILITY & PREFERS-REDUCED-MOTION
    ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
