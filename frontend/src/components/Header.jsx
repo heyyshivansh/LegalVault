@@ -1,8 +1,8 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext';
 
-export default function Header({ isOnline, onOpenUpload, onRefresh }) {
-  const { user, role, logout, canDeposit } = useAuth();
+export default function Header({ isOnline, onOpenUpload, onRefresh, onOpenSystemAudit }) {
+  const { user, role, logout, canDeposit, isAdmin } = useAuth();
 
   const getRoleBadgeStyle = (r) => {
     switch (r) {
@@ -49,6 +49,19 @@ export default function Header({ isOnline, onOpenUpload, onRefresh }) {
           >
             Refresh
           </button>
+
+          {/* Admin System Audit Trail */}
+          {isAdmin && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              style={{ backgroundColor: '#EEF2FF', color: '#4338CA', borderColor: '#C7D2FE', fontWeight: 600 }}
+              onClick={onOpenSystemAudit}
+              title="Inspect system-wide forensic audit log"
+            >
+              📋 System Audit
+            </button>
+          )}
 
           {/* Deposit Button: Only for Lawyer and Admin */}
           {canDeposit && (

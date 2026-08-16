@@ -347,3 +347,71 @@ export async function verifyDocumentVersion(documentId, versionIdentifier) {
   return await res.json();
 }
 
+export async function logoutUser() {
+  try {
+    await fetch(`${API_BASE}/auth/logout`, {
+      method: 'POST',
+      headers: {
+        ...getAuthHeader(),
+      },
+    });
+  } catch (err) {
+    console.warn('Backend logout notification failed:', err);
+  } finally {
+    localStorage.removeItem('legalvault_token');
+  }
+}
+
+
+// --- Audit Trail API Functions ---
+
+export async function fetchDocumentAuditTrail(documentId, params = {}) {
+  const query = new URLSearchParams();
+  if (params.limit) query.append('limit', params.limit);
+  if (params.offset) query.append('offset', params.offset);
+  if (params.action) query.append('action', params.action);
+  if (params.version_number !== undefined && params.version_number !== null) {
+    query.append('version_number', params.version_number);
+  }
+  if (params.result) query.append('result', params.result);
+
+  const qs = query.toString() ? `?${query.toString()}` : '';
+  const res = await fetch(`${API_BASE}/documents/${documentId}/audit${qs}`, {
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to fetch audit trail for document #${documentId}`);
+  }
+
+  return await res.json();
+}
+
+export async function fetchSystemAuditTrail(params = {}) {
+  const query = new URLSearchParams();
+  if (params.limit) query.append('limit', params.limit);
+  if (params.offset) query.append('offset', params.offset);
+  if (params.action) query.append('action', params.action);
+  if (params.actor_id) query.append('actor_id', params.actor_id);
+  if (params.document_id) query.append('document_id', params.document_id);
+  if (params.result) query.append('result', params.result);
+
+  const qs = query.toString() ? `?${query.toString()}` : '';
+  const res = await fetch(`${API_BASE}/audit${qs}`, {
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to fetch system audit trail`);
+  }
+
+  return await res.json();
+}
+
+

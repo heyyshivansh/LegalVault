@@ -7,6 +7,7 @@ import {
   downloadVersionFile,
 } from '../services/api';
 import { getDocumentIntegrity } from '../utils/integrity';
+import { getLiveAuditTimestampIST, formatBlockTimestampIST } from '../utils/timezone';
 
 export default function VerificationModal({
   documentId,
@@ -52,7 +53,7 @@ export default function VerificationModal({
     setSingleData(null);
     setFullProgressList([]);
     setOverallSummary(null);
-    setAuditTimestamp(new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'medium' }));
+    setAuditTimestamp(getLiveAuditTimestampIST());
 
     if (versionIdentifier) {
       // --- MODE 1: SINGLE VERSION VERIFICATION ---
@@ -194,15 +195,7 @@ export default function VerificationModal({
     }
   };
 
-  const formatTimestamp = (ts) => {
-    if (!ts) return 'Not recorded';
-    try {
-      const date = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts);
-      return date.toUTCString();
-    } catch {
-      return String(ts);
-    }
-  };
+  const formatTimestamp = (ts) => formatBlockTimestampIST(ts);
 
   const formatFileSize = (bytes) => {
     if (!bytes || bytes === 0) return '0 B';

@@ -7,6 +7,7 @@ import VerificationModal from './components/VerificationModal';
 import DocumentDetailDrawer from './components/DocumentDetailDrawer';
 import ShareDocumentModal from './components/ShareDocumentModal';
 import AdminResetModal from './components/AdminResetModal';
+import SystemAuditModal from './components/SystemAuditModal';
 import LoginView from './components/LoginView';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { checkApiHealth, fetchDocuments } from './services/api';
@@ -35,6 +36,7 @@ function VaultWorkspace() {
   const [inspectingDocId, setInspectingDocId] = useState(null);
   const [sharingDoc, setSharingDoc] = useState(null);
   const [isResetOpen, setIsResetOpen] = useState(false);
+  const [isSystemAuditOpen, setIsSystemAuditOpen] = useState(false);
 
   const handleOpenVerify = (id, versionNumber = null) => {
     setVerifyingDocId(id);
@@ -161,6 +163,7 @@ function VaultWorkspace() {
         isOnline={isOnline}
         onOpenUpload={() => setIsUploadOpen(true)}
         onRefresh={loadData}
+        onOpenSystemAudit={() => setIsSystemAuditOpen(true)}
       />
 
       <main className="main-content">
@@ -210,11 +213,20 @@ function VaultWorkspace() {
                 </span>
               </div>
               <div style={{ fontSize: '0.8rem', color: '#713F12', marginTop: '0.15rem' }}>
-                You have unrestricted access to all vault dockets, cryptographic proofs, active shares, and blockchain transactions.
+                You have unrestricted access to all vault dockets, cryptographic proofs, active shares, and system audit logs.
               </div>
             </div>
 
             <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                style={{ backgroundColor: '#EEF2FF', color: '#4338CA', borderColor: '#C7D2FE', fontSize: '0.75rem', padding: '0.35rem 0.75rem', fontWeight: 600 }}
+                onClick={() => setIsSystemAuditOpen(true)}
+                title="View full forensic audit trail across all users and documents"
+              >
+                📋 View System Audit Trail
+              </button>
               <button
                 type="button"
                 className="btn btn-danger btn-sm"
@@ -283,6 +295,14 @@ function VaultWorkspace() {
           isOpen={isResetOpen}
           onClose={() => setIsResetOpen(false)}
           onResetSuccess={handleResetSuccess}
+        />
+      )}
+
+      {/* Admin System Audit Modal */}
+      {isAdmin && (
+        <SystemAuditModal
+          isOpen={isSystemAuditOpen}
+          onClose={() => setIsSystemAuditOpen(false)}
         />
       )}
     </div>

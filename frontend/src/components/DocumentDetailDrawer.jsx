@@ -7,9 +7,11 @@ import {
   fetchDocumentVersions,
   uploadDocumentVersion,
   downloadVersionFile,
+  fetchDocumentAuditTrail,
 } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { getVersionIntegrity } from '../utils/integrity';
+import { formatISTDateTime, formatBlockTimestampIST } from '../utils/timezone';
 
 const ALLOWED_EXTENSIONS = ['.pdf', '.txt', '.docx', '.jpg', '.jpeg', '.png'];
 const MAX_FILE_SIZE_MB = 10;
@@ -26,6 +28,14 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
   const [revokingShareId, setRevokingShareId] = useState(null);
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadingVersionNum, setDownloadingVersionNum] = useState(null);
+
+  // Audit Trail State
+  const [auditEvents, setAuditEvents] = useState([]);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState(null);
+  const [auditActionFilter, setAuditActionFilter] = useState('');
+  const [auditVersionFilter, setAuditVersionFilter] = useState('');
 
   // New Revision Upload Modal State
   const [isUploadRevisionOpen, setIsUploadRevisionOpen] = useState(false);
@@ -45,6 +55,27 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
     setRevisionSubmitting(false);
     setIsHashingRevision(false);
   }, []);
+
+  const loadAuditTrail = useCallback(async (actionFilter = auditActionFilter, versionFilter = auditVersionFilter) => {
+    if (!documentId) return;
+    setAuditLoading(true);
+    setAuditError(null);
+    try {
+      const params = { limit: 100 };
+      if (actionFilter) params.action = actionFilter;
+      if (versionFilter !== '' && versionFilter !== null && versionFilter !== undefined) {
+        params.version_number = parseInt(versionFilter, 10);
+      }
+      const data = await fetchDocumentAuditTrail(documentId, params);
+      setAuditEvents(data.events || []);
+      setAuditTotal(data.total_count || 0);
+    } catch (err) {
+      console.warn('Failed to load audit trail:', err);
+      setAuditError(err.message || 'Failed to load audit trail.');
+    } finally {
+      setAuditLoading(false);
+    }
+  }, [documentId, auditActionFilter, auditVersionFilter]);
 
   const loadDetail = useCallback(async () => {
     if (!documentId) return;
@@ -74,6 +105,15 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
       } else {
         setShares([]);
       }
+
+      // Load Audit Trail
+      try {
+        const auditData = await fetchDocumentAuditTrail(documentId, { limit: 100 });
+        setAuditEvents(auditData.events || []);
+        setAuditTotal(auditData.total_count || 0);
+      } catch (err) {
+        console.warn('Failed to load audit trail:', err);
+      }
     } catch (err) {
       setError(err.message || 'Failed to load document details.');
     } finally {
@@ -88,6 +128,11 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
       setDoc(null);
       setVersions([]);
       setShares([]);
+      setAuditEvents([]);
+      setAuditTotal(0);
+      setAuditError(null);
+      setAuditActionFilter('');
+      setAuditVersionFilter('');
       setError(null);
       setIsUploadRevisionOpen(false);
       resetRevisionForm();
@@ -116,6 +161,52 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
     }
   };
 
+  const getActionBadgeStyle = (action) => {
+    switch (action) {
+      case 'DOCUMENT_CREATED':
+      case 'VERSION_CREATED':
+        return { backgroundColor: '#EEF2FF', color: '#4338CA', border: '1px solid #C7D2FE' };
+      case 'DOCUMENT_VERIFIED':
+      case 'VERSION_VERIFIED':
+        return { backgroundColor: '#ECFDF5', color: '#047857', border: '1px solid #A7F3D0' };
+      case 'DOCUMENT_TAMPERED':
+      case 'VERSION_TAMPERED':
+        return { backgroundColor: '#FEF2F2', color: '#B91C1C', border: '1px solid #FECACA' };
+      case 'DOCUMENT_SHARED':
+        return { backgroundColor: '#FAF5FF', color: '#7E22CE', border: '1px solid #E9D5FF' };
+      case 'DOCUMENT_SHARE_REVOKED':
+        return { backgroundColor: '#FFFBEB', color: '#B45309', border: '1px solid #FDE68A' };
+      case 'DOCUMENT_DOWNLOADED':
+      case 'VERSION_DOWNLOADED':
+        return { backgroundColor: '#F0FDFA', color: '#0F766E', border: '1px solid #99F6E4' };
+      case 'DOCUMENT_VIEWED':
+      case 'VERSION_VIEWED':
+      case 'SHARED_DOCUMENT_ACCESSED':
+        return { backgroundColor: '#F8FAFC', color: '#475569', border: '1px solid #E2E8F0' };
+      case 'ACCESS_DENIED':
+      case 'ACTION_DENIED':
+        return { backgroundColor: '#FFF1F2', color: '#BE123C', border: '1px solid #FECDD3' };
+      default:
+        return { backgroundColor: '#F1F5F9', color: '#334155', border: '1px solid #CBD5E1' };
+    }
+  };
+
+  const getResultBadgeStyle = (res) => {
+    switch (res) {
+      case 'SUCCESS':
+      case 'VERIFIED':
+        return { backgroundColor: '#ECFDF5', color: '#065F46', fontWeight: 600 };
+      case 'TAMPERED':
+      case 'FAILED':
+      case 'DENIED':
+        return { backgroundColor: '#FEF2F2', color: '#991B1B', fontWeight: 700 };
+      case 'UNAVAILABLE':
+        return { backgroundColor: '#FFFBEB', color: '#92400E', fontWeight: 600 };
+      default:
+        return { backgroundColor: '#F1F5F9', color: '#475569', fontWeight: 500 };
+    }
+  };
+
   const handleDownloadMaster = async () => {
     if (!doc) return;
     setIsDownloading(true);
@@ -140,27 +231,9 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
     }
   };
 
-  const formatDate = (isoString) => {
-    if (!isoString) return '—';
-    try {
-      return new Date(isoString).toLocaleString('en-US', {
-        dateStyle: 'medium',
-        timeStyle: 'medium',
-      });
-    } catch {
-      return isoString;
-    }
-  };
+  const formatDate = (isoString) => formatISTDateTime(isoString);
 
-  const formatTimestamp = (ts) => {
-    if (!ts) return 'Not recorded';
-    try {
-      const date = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts);
-      return date.toUTCString();
-    } catch {
-      return String(ts);
-    }
-  };
+  const formatTimestamp = (ts) => formatBlockTimestampIST(ts);
 
   const formatFileSize = (bytes) => {
     if (!bytes || bytes === 0) return '0 B';
@@ -794,6 +867,181 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
                   )}
                 </div>
               )}
+
+              {/* Forensic Audit Trail & Chain of Custody Section */}
+              <div className="audit-trail-section">
+                <div className="audit-trail-header">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <div className="serif-heading" style={{ fontSize: '0.98rem' }}>
+                      Forensic Audit Trail &amp; Chain of Custody
+                    </div>
+                    <span className="badge" style={{ fontSize: '0.7rem', backgroundColor: 'var(--bg-subtle)', color: 'var(--ink-secondary)' }}>
+                      {auditTotal} event{auditTotal === 1 ? '' : 's'}
+                    </span>
+                  </div>
+
+                  <div className="audit-trail-controls">
+                    {/* Action Filter */}
+                    <select
+                      value={auditActionFilter}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setAuditActionFilter(val);
+                        loadAuditTrail(val, auditVersionFilter);
+                      }}
+                      className="audit-filter-select"
+                    >
+                      <option value="">All Actions</option>
+                      <option value="DOCUMENT_CREATED">Created</option>
+                      <option value="VERSION_CREATED">Revision Created</option>
+                      <option value="DOCUMENT_VERIFIED">Verified</option>
+                      <option value="VERSION_VERIFIED">Version Verified</option>
+                      <option value="DOCUMENT_TAMPERED">Tamper Detected</option>
+                      <option value="DOCUMENT_SHARED">Shared</option>
+                      <option value="DOCUMENT_SHARE_REVOKED">Share Revoked</option>
+                      <option value="DOCUMENT_DOWNLOADED">Downloaded</option>
+                      <option value="DOCUMENT_VIEWED">Viewed</option>
+                      <option value="ACCESS_DENIED">Access Denied</option>
+                    </select>
+
+                    {/* Version Filter */}
+                    <select
+                      value={auditVersionFilter}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setAuditVersionFilter(val);
+                        loadAuditTrail(auditActionFilter, val);
+                      }}
+                      className="audit-filter-select"
+                    >
+                      <option value="">All Versions</option>
+                      {versions.map((v) => (
+                        <option key={v.version_number} value={v.version_number}>
+                          v{v.version_number}
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem' }}
+                      onClick={() => loadAuditTrail(auditActionFilter, auditVersionFilter)}
+                      disabled={auditLoading}
+                      title="Refresh audit events"
+                    >
+                      {auditLoading ? '...' : '↻'}
+                    </button>
+                  </div>
+                </div>
+
+                {auditLoading && (
+                  <div className="audit-loading-indicator">
+                    <span style={{ fontSize: '0.78rem', color: 'var(--ink-muted)' }}>Updating audit records...</span>
+                  </div>
+                )}
+
+                {auditError && (
+                  <div style={{ fontSize: '0.78rem', color: '#B91C1C', backgroundColor: '#FEF2F2', padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-xs)', marginBottom: '0.75rem', border: '1px solid #FECACA' }}>
+                    {auditError}
+                  </div>
+                )}
+
+                {auditEvents.length === 0 && !auditLoading ? (
+                  <div style={{ fontSize: '0.8rem', color: 'var(--ink-muted)', padding: '0.75rem 1rem', backgroundColor: 'var(--bg-subtle)', borderRadius: 'var(--radius-xs)', border: '1px solid var(--border-color)', width: '100%', boxSizing: 'border-box' }}>
+                    No audit records match the selected filters.
+                  </div>
+                ) : (
+                  <div className="audit-event-list">
+                    {auditEvents.map((evt) => {
+                      const actionStyle = getActionBadgeStyle(evt.action);
+                      const resultStyle = getResultBadgeStyle(evt.result);
+                      return (
+                        <div
+                          key={evt.id}
+                          className="audit-event-card"
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.35rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                              <span
+                                className="badge"
+                                style={{
+                                  fontSize: '0.68rem',
+                                  padding: '0.12rem 0.45rem',
+                                  fontWeight: 700,
+                                  ...actionStyle,
+                                }}
+                              >
+                                {evt.action}
+                              </span>
+
+                              {evt.version_number && (
+                                <span
+                                  className="badge"
+                                  style={{
+                                    backgroundColor: '#EDE9FE',
+                                    color: '#5B21B6',
+                                    fontSize: '0.65rem',
+                                    fontWeight: 700,
+                                    padding: '0.1rem 0.35rem',
+                                  }}
+                                >
+                                  v{evt.version_number}
+                                </span>
+                              )}
+
+                              <span
+                                className="badge"
+                                style={{
+                                  fontSize: '0.65rem',
+                                  padding: '0.1rem 0.35rem',
+                                  ...resultStyle,
+                                }}
+                              >
+                                {evt.result}
+                              </span>
+                            </div>
+
+                            <span style={{ fontSize: '0.72rem', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}>
+                              {formatDate(evt.created_at)}
+                            </span>
+                          </div>
+
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: 'var(--ink-primary)', fontSize: '0.78rem' }}>
+                            <div>
+                              <span style={{ fontWeight: 600 }}>{evt.actor_name || 'System / Anonymous'}</span>
+                              {evt.actor_role && (
+                                <span className="badge" style={{ marginLeft: '0.4rem', fontSize: '0.62rem', padding: '0.08rem 0.3rem', backgroundColor: 'var(--bg-subtle)' }}>
+                                  {evt.actor_role}
+                                </span>
+                              )}
+                            </div>
+
+                            {evt.metadata && evt.metadata.shared_with_name && (
+                              <div style={{ fontSize: '0.72rem', color: 'var(--ink-secondary)' }}>
+                                Shared with: <strong>{evt.metadata.shared_with_name}</strong> ({evt.metadata.shared_with_role})
+                              </div>
+                            )}
+                          </div>
+
+                          {evt.reason && (
+                            <div style={{ fontSize: '0.72rem', color: evt.result === 'TAMPERED' || evt.result === 'DENIED' ? '#DC2626' : 'var(--ink-secondary)', fontStyle: 'italic' }}>
+                              {evt.reason}
+                            </div>
+                          )}
+
+                          {evt.metadata && evt.metadata.current_hash && evt.metadata.blockchain_hash && (
+                            <div style={{ fontSize: '0.68rem', backgroundColor: '#FEF2F2', padding: '0.35rem 0.5rem', borderRadius: 'var(--radius-xs)', border: '1px solid #FECACA', fontFamily: 'var(--font-mono)' }}>
+                              <div><strong>Calculated:</strong> {evt.metadata.current_hash}</div>
+                              <div><strong>On-Chain:</strong> {evt.metadata.blockchain_hash}</div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
 
               {/* Master Actions Toolbar */}
               <div style={{ marginTop: '1.75rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>

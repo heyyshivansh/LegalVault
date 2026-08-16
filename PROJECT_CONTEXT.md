@@ -253,4 +253,37 @@ LegalVault implements immutable revision tracking for legal records:
 Run the test suite:
 ```bash
 python test_version_history.py
-```
+```
+
+---
+
+## Indian Standard Time (IST) & Timezone Architecture
+
+LegalVault standardizes all timestamps across the system using a canonical UTC storage and IANA `Asia/Kolkata` presentation strategy:
+
+### 1. Canonical UTC Backend Storage
+- All internal datetime objects are generated using timezone-aware UTC: `datetime.now(timezone.utc)`.
+- SQLite database persists timestamps in canonical UTC.
+- Historical naive timestamps are strictly interpreted as UTC without modifying or shifting numerical clock values.
+
+### 2. Timezone-Aware API Serialization
+- All API datetime endpoints return unambiguous ISO 8601 UTC strings ending with `'Z'` via `format_utc_iso()`:
+  `"2026-08-16T08:45:00.123456Z"`
+- Blockchain block timestamps are returned as raw Unix epoch seconds (`block.timestamp`).
+
+### 3. Centralized Frontend IST Conversion (`frontend/src/utils/timezone.js`)
+- Standardized conversion to **Indian Standard Time (IST, UTC+05:30)** using IANA identifier `Asia/Kolkata` via `Intl.DateTimeFormat`.
+- `formatISTDateTime()` renders user-facing timestamps (e.g. `16 Aug 2026, 2:15 PM IST`).
+- `formatBlockTimestampIST()` renders blockchain EVM block timestamps in IST.
+- Client/host browser timezone configuration does not alter the displayed IST representation.
+
+### 4. Automated Timezone Verification Suite
+Run the timezone test suites:
+```bash
+# Backend test
+python test_timezone_ist.py
+
+# Frontend cross-timezone matrix test
+node test_timezone.js
+```
+

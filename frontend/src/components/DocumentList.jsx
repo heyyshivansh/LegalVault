@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { downloadDocumentFile } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { getDocumentIntegrity } from '../utils/integrity';
+import { formatISTDateTime } from '../utils/timezone';
 
 export default function DocumentList({
   documents = [],
@@ -45,21 +46,7 @@ export default function DocumentList({
     return matchesSearch && matchesStatus;
   });
 
-  const formatDate = (isoString) => {
-    if (!isoString) return '—';
-    try {
-      const date = new Date(isoString);
-      return date.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-    } catch {
-      return isoString;
-    }
-  };
+  const formatDate = (isoString) => formatISTDateTime(isoString);
 
   const truncateHash = (hash) => {
     if (!hash) return 'Pending Hashing...';

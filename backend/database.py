@@ -19,7 +19,7 @@ Base = declarative_base()
 
 def migrate_schema() -> None:
     import os
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     inspector = inspect(engine)
     table_names = inspector.get_table_names()
@@ -74,7 +74,7 @@ def migrate_schema() -> None:
                         uploader_id=doc.owner_id,
                         blockchain_tx_hash=doc.blockchain_tx_hash,
                         blockchain_status=doc.blockchain_status or "pending",
-                        created_at=doc.created_at or datetime.utcnow(),
+                        created_at=doc.created_at or datetime.now(timezone.utc),
                     )
                     db.add(v1)
             db.commit()

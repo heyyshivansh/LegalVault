@@ -65,8 +65,8 @@ export default function LoginView() {
   };
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem 1.5rem', backgroundColor: 'var(--bg-app)' }}>
-      <div style={{ width: '100%', maxWidth: '520px', backgroundColor: 'var(--bg-surface)', border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-sm)', boxShadow: 'var(--shadow-lg)', overflow: 'hidden' }}>
+    <div className="login-page-container" style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem 1.5rem', backgroundColor: 'var(--bg-app)' }}>
+      <div className="login-card" style={{ width: '100%', maxWidth: '520px', backgroundColor: 'var(--bg-surface)', border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-sm)', boxShadow: 'var(--shadow-lg)', overflow: 'hidden' }}>
         
         {/* Institutional Gatekeeper Header */}
         <div style={{ padding: '2rem 2rem 1.5rem', borderBottom: '1px solid var(--border-color)', backgroundColor: 'var(--bg-subtle)', textAlign: 'center' }}>

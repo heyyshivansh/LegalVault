@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, status
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -6,10 +6,10 @@ from sqlalchemy.orm import Session
 import shutil
 import os
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 
 from database import engine, Base, SessionLocal, migrate_schema, seed_initial_users
-from models import Document, User, UserRole, DocumentShare, DocumentVersion
+from models import Document, User, UserRole, DocumentShare, DocumentVersion, AuditLog
 from sqlalchemy.exc import IntegrityError
 from blockchain import (
     register_document_on_chain,
@@ -24,6 +24,13 @@ from auth import (
     verify_password,
     create_access_token,
     get_db,
+)
+from audit import (
+    log_audit_event,
+    AuditEventType,
+    AuditResult,
+    AuditResourceType,
+    format_audit_event_response,
 )
 
 Base.metadata.create_all(bind=engine)
@@ -44,6 +51,24 @@ UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
+from pydantic import BaseModel, field_serializer
+
+
+def format_utc_iso(dt: datetime | None) -> str | None:
+    """
+    Serializes a datetime object to an unambiguous UTC ISO 8601 string ending in 'Z'.
+    If the datetime is naive (such as historical records read from SQLite), it is
+    explicitly interpreted as UTC without modifying or shifting the numerical clock value.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
 # --- Schemas ---
 
 class LoginRequest(BaseModel):
@@ -60,6 +85,10 @@ class UserResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+    @field_serializer("created_at")
+    def serialize_created_at(self, dt: datetime | None, _info) -> str | None:
+        return format_utc_iso(dt)
 
 
 class LoginResponse(BaseModel):
@@ -85,6 +114,39 @@ class ResetVaultResponse(BaseModel):
     documents_deleted: int
     shares_deleted: int
     files_deleted: int
+    audit_records_cleared: int | None = None
+
+
+class AuditLogItemResponse(BaseModel):
+    id: int
+    actor_id: int | None = None
+    actor_name: str | None = None
+    actor_role: str | None = None
+    actor_email: str | None = None
+    ip_address: str | None = None
+    action: str
+    resource_type: str | None = None
+    resource_id: str | None = None
+    document_id: int | None = None
+    document_title: str | None = None
+    version_id: int | None = None
+    version_number: int | None = None
+    result: str
+    reason: str | None = None
+    metadata: dict | None = None
+    created_at: str | None = None
+
+
+class DocumentAuditResponse(BaseModel):
+    document_id: int
+    total_count: int
+    events: list[AuditLogItemResponse]
+
+
+class SystemAuditResponse(BaseModel):
+    total_count: int
+    events: list[AuditLogItemResponse]
+
 
 
 LEGALVAULT_ENV = os.getenv("LEGALVAULT_ENV", "development").strip().lower()
@@ -152,15 +214,32 @@ def home():
 
 
 @app.post("/auth/login", response_model=LoginResponse)
-def login(req: LoginRequest, db: Session = Depends(get_db)):
+def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
     email_clean = req.email.lower().strip()
+    client_ip = request.client.host if request.client else None
     user = db.query(User).filter(User.email == email_clean).first()
     if not user or not verify_password(req.password, user.password_hash):
+        log_audit_event(
+            action=AuditEventType.LOGIN_FAILED,
+            result=AuditResult.FAILED,
+            actor_email=email_clean,
+            ip_address=client_ip,
+            reason="Invalid email or password",
+            isolated=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    log_audit_event(
+        db=db,
+        action=AuditEventType.LOGIN_SUCCESS,
+        result=AuditResult.SUCCESS,
+        actor=user,
+        ip_address=client_ip,
+    )
 
     token = create_access_token(
         data={"sub": str(user.id), "email": user.email, "role": user.role}
@@ -170,6 +249,23 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         "token_type": "bearer",
         "user": user,
     }
+
+
+@app.post("/auth/logout")
+def logout(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    client_ip = request.client.host if request.client else None
+    log_audit_event(
+        db=db,
+        action=AuditEventType.LOGOUT,
+        result=AuditResult.SUCCESS,
+        actor=current_user,
+        ip_address=client_ip,
+    )
+    return {"message": "Logged out successfully"}
 
 
 @app.get("/auth/me", response_model=UserResponse)
@@ -214,7 +310,7 @@ def list_documents(
                 "version": doc.version,
                 "blockchain_tx_hash": doc.blockchain_tx_hash,
                 "blockchain_status": doc.blockchain_status,
-                "created_at": doc.created_at.isoformat() if doc.created_at else None,
+                "created_at": format_utc_iso(doc.created_at),
                 "is_owner": True,
                 "is_shared": False,
                 "shared_by_name": None,
@@ -246,7 +342,7 @@ def list_documents(
                     "version": doc.version,
                     "blockchain_tx_hash": doc.blockchain_tx_hash,
                     "blockchain_status": doc.blockchain_status,
-                    "created_at": doc.created_at.isoformat() if doc.created_at else None,
+                    "created_at": format_utc_iso(doc.created_at),
                     "is_owner": is_owner,
                     "is_shared": share is not None and not is_owner,
                     "shared_by_name": creator_name,
@@ -284,7 +380,7 @@ def list_documents(
                 "version": doc.version,
                 "blockchain_tx_hash": doc.blockchain_tx_hash,
                 "blockchain_status": doc.blockchain_status,
-                "created_at": doc.created_at.isoformat() if doc.created_at else None,
+                "created_at": format_utc_iso(doc.created_at),
                 "is_owner": False,
                 "is_shared": True,
                 "shared_by_name": creator_name or doc.uploaded_by,
@@ -347,6 +443,15 @@ def get_document_detail(
         )
 
     if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to view document #{document_id}",
+            metadata={"attempted_action": "VIEW_DOCUMENT"},
+            isolated=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access forbidden: You do not have permission to view document #{document_id}",
@@ -363,6 +468,26 @@ def get_document_detail(
     if version_count == 0:
         version_count = 1
 
+    # Record audit event for viewing document
+    if not is_owner and current_user.role != UserRole.ADMIN:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.SHARED_DOCUMENT_ACCESSED,
+            result=AuditResult.SUCCESS,
+            actor=current_user,
+            document=document,
+            version_number=document.version or 1,
+        )
+    else:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.DOCUMENT_VIEWED,
+            result=AuditResult.SUCCESS,
+            actor=current_user,
+            document=document,
+            version_number=document.version or 1,
+        )
+
     return {
         "id": document.id,
         "filename": document.filename,
@@ -373,7 +498,7 @@ def get_document_detail(
         "version_count": version_count,
         "blockchain_tx_hash": document.blockchain_tx_hash,
         "blockchain_status": document.blockchain_status,
-        "created_at": document.created_at.isoformat() if document.created_at else None,
+        "created_at": format_utc_iso(document.created_at),
         "onchain": onchain_data,
         "contract_address": CONTRACT_ADDRESS,
         "is_owner": is_owner,
@@ -394,6 +519,15 @@ def download_document(
         )
 
     if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to download document #{document_id}",
+            metadata={"attempted_action": "DOWNLOAD_DOCUMENT"},
+            isolated=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access forbidden: You do not have permission to download document #{document_id}",
@@ -411,6 +545,15 @@ def download_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Stored document file '{document.filename}' not found on disk",
         )
+
+    log_audit_event(
+        db=db,
+        action=AuditEventType.DOCUMENT_DOWNLOADED,
+        result=AuditResult.SUCCESS,
+        actor=current_user,
+        document=document,
+        version_number=document.version or 1,
+    )
 
     return FileResponse(
         path=file_path,
@@ -473,7 +616,7 @@ def upload_document(
                         "uploaded_by": existing_doc.uploaded_by,
                         "file_hash": existing_doc.file_hash,
                         "blockchain_status": existing_doc.blockchain_status,
-                        "created_at": existing_doc.created_at.isoformat() if existing_doc.created_at else None,
+                        "created_at": format_utc_iso(existing_doc.created_at),
                     },
                 },
             )
@@ -564,6 +707,18 @@ def upload_document(
     db.commit()
     db.refresh(document)
 
+    # Audit log for document creation
+    log_audit_event(
+        db=db,
+        action=AuditEventType.DOCUMENT_CREATED,
+        result=AuditResult.SUCCESS,
+        actor=current_user,
+        document=document,
+        version=v1,
+        version_number=1,
+        metadata={"case_number": case_number},
+    )
+
     return {
         "message": "Document uploaded successfully",
         "document_id": document.id,
@@ -592,6 +747,15 @@ def list_document_versions(
         )
 
     if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to view versions for document #{document_id}",
+            metadata={"attempted_action": "LIST_VERSIONS"},
+            isolated=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access forbidden: You do not have permission to view versions for document #{document_id}",
@@ -617,7 +781,7 @@ def list_document_versions(
                 "uploader_id": document.owner_id,
                 "blockchain_tx_hash": document.blockchain_tx_hash,
                 "blockchain_status": document.blockchain_status,
-                "created_at": document.created_at.isoformat() if document.created_at else None,
+                "created_at": format_utc_iso(document.created_at),
                 "is_current": True,
             }
         ]
@@ -636,7 +800,7 @@ def list_document_versions(
             "uploader_id": v.uploader_id,
             "blockchain_tx_hash": v.blockchain_tx_hash,
             "blockchain_status": v.blockchain_status,
-            "created_at": v.created_at.isoformat() if v.created_at else None,
+            "created_at": format_utc_iso(v.created_at),
             "is_current": (v.version_number == document.version),
         }
         for v in versions
@@ -659,6 +823,15 @@ def get_document_version_detail(
         )
 
     if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to view document #{document_id}",
+            metadata={"attempted_action": "VIEW_VERSION", "version_identifier": str(version_identifier)},
+            isolated=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access forbidden: You do not have permission to view document #{document_id}",
@@ -684,6 +857,16 @@ def get_document_version_detail(
     except Exception:
         pass
 
+    log_audit_event(
+        db=db,
+        action=AuditEventType.VERSION_VIEWED,
+        result=AuditResult.SUCCESS,
+        actor=current_user,
+        document=document,
+        version=version,
+        version_number=version.version_number,
+    )
+
     return {
         "id": version.id,
         "document_id": version.document_id,
@@ -697,7 +880,7 @@ def get_document_version_detail(
         "uploader_id": version.uploader_id,
         "blockchain_tx_hash": version.blockchain_tx_hash,
         "blockchain_status": version.blockchain_status,
-        "created_at": version.created_at.isoformat() if version.created_at else None,
+        "created_at": format_utc_iso(version.created_at),
         "is_current": (version.version_number == document.version),
         "onchain": onchain_data,
         "contract_address": CONTRACT_ADDRESS,
@@ -720,6 +903,15 @@ def download_document_version(
         )
 
     if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to download document #{document_id}",
+            metadata={"attempted_action": "DOWNLOAD_VERSION", "version_identifier": str(version_identifier)},
+            isolated=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access forbidden: You do not have permission to download document #{document_id}",
@@ -738,6 +930,16 @@ def download_document_version(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Stored document version file '{version.filename}' (v{version.version_number}) not found on disk",
         )
+
+    log_audit_event(
+        db=db,
+        action=AuditEventType.VERSION_DOWNLOADED,
+        result=AuditResult.SUCCESS,
+        actor=current_user,
+        document=document,
+        version=version,
+        version_number=version.version_number,
+    )
 
     return FileResponse(
         path=file_path,
@@ -772,6 +974,15 @@ def upload_document_version(
 
     # Permissions: Only Document Owner or Admin can upload new version
     if not check_document_ownership(document, current_user):
+        log_audit_event(
+            action=AuditEventType.ACTION_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason="Access forbidden: You do not have permission to upload revisions to this document. Only the document owner or an administrator can create new versions.",
+            metadata={"attempted_action": "VERSION_UPLOAD"},
+            isolated=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access forbidden: You do not have permission to upload revisions to this document. Only the document owner or an administrator can create new versions.",
@@ -825,7 +1036,7 @@ def upload_document_version(
                         "version_number": existing_version.version_number,
                         "filename": existing_version.filename,
                         "file_hash": existing_version.file_hash,
-                        "created_at": existing_version.created_at.isoformat() if existing_version.created_at else None,
+                        "created_at": format_utc_iso(existing_version.created_at),
                     },
                 },
             )
@@ -931,6 +1142,17 @@ def upload_document_version(
     db.refresh(new_version)
     db.refresh(document)
 
+    # Audit log for version creation
+    log_audit_event(
+        db=db,
+        action=AuditEventType.VERSION_CREATED,
+        result=AuditResult.SUCCESS,
+        actor=current_user,
+        document=document,
+        version=new_version,
+        version_number=next_version,
+    )
+
     return {
         "message": f"Version {next_version} created and anchored successfully",
         "document_id": document.id,
@@ -941,7 +1163,7 @@ def upload_document_version(
         "file_size": new_version.file_size,
         "blockchain_tx_hash": new_version.blockchain_tx_hash,
         "blockchain_status": new_version.blockchain_status,
-        "created_at": new_version.created_at.isoformat() if new_version.created_at else None,
+        "created_at": format_utc_iso(new_version.created_at),
     }
 
 
@@ -961,6 +1183,15 @@ def verify_document_version(
         )
 
     if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to verify document #{document_id}",
+            metadata={"attempted_action": "VERIFY_VERSION", "version_identifier": str(version_identifier)},
+            isolated=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access forbidden: You do not have permission to verify document #{document_id}",
@@ -1034,6 +1265,16 @@ def verify_document_version(
     timestamp = onchain_data.get("timestamp")
 
     if not blockchain_hash or blockchain_hash == "" or timestamp == 0:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.BLOCKCHAIN_PROOF_UNAVAILABLE,
+            result=AuditResult.UNAVAILABLE,
+            actor=current_user,
+            document=document,
+            version=version,
+            version_number=version.version_number,
+            reason=f"Version {version.version_number} exists in vault repository, but its blockchain proof is unavailable on the currently connected chain.",
+        )
         return {
             "document_id": document.id,
             "version_id": version.id,
@@ -1057,6 +1298,30 @@ def verify_document_version(
 
     is_verified = (current_hash.lower() == blockchain_hash.lower())
     result_text = "VERIFIED" if is_verified else "TAMPERED"
+
+    if is_verified:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.VERSION_VERIFIED,
+            result=AuditResult.VERIFIED,
+            actor=current_user,
+            document=document,
+            version=version,
+            version_number=version.version_number,
+            metadata={"timestamp": timestamp},
+        )
+    else:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.VERSION_TAMPERED,
+            result=AuditResult.TAMPERED,
+            actor=current_user,
+            document=document,
+            version=version,
+            version_number=version.version_number,
+            reason=f"Local cryptographic hash does not match on-chain anchor for Version {version.version_number}",
+            metadata={"current_hash": current_hash, "blockchain_hash": blockchain_hash},
+        )
 
     return {
         "document_id": document.id,
@@ -1093,6 +1358,15 @@ def verify_document(
         )
 
     if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to verify document #{document_id}",
+            metadata={"attempted_action": "VERIFY_DOCUMENT"},
+            isolated=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access forbidden: You do not have permission to verify document #{document_id}",
@@ -1167,6 +1441,15 @@ def verify_document(
 
     # If document has no registered hash on this chain instance (e.g. after local chain reset)
     if not blockchain_hash or blockchain_hash == "" or timestamp == 0:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.BLOCKCHAIN_PROOF_UNAVAILABLE,
+            result=AuditResult.UNAVAILABLE,
+            actor=current_user,
+            document=document,
+            version_number=document.version or 1,
+            reason="Blockchain proof unavailable on the currently connected chain",
+        )
         return {
             "document_id": document.id,
             "filename": document.filename,
@@ -1187,6 +1470,28 @@ def verify_document(
 
     is_verified = (current_hash.lower() == blockchain_hash.lower())
     result_text = "VERIFIED" if is_verified else "TAMPERED"
+
+    if is_verified:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.DOCUMENT_VERIFIED,
+            result=AuditResult.VERIFIED,
+            actor=current_user,
+            document=document,
+            version_number=document.version or 1,
+            metadata={"timestamp": timestamp},
+        )
+    else:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.DOCUMENT_TAMPERED,
+            result=AuditResult.TAMPERED,
+            actor=current_user,
+            document=document,
+            version_number=document.version or 1,
+            reason=f"Master hash mismatch against on-chain anchor (Version v{document.version or 1})",
+            metadata={"current_hash": current_hash, "blockchain_hash": blockchain_hash},
+        )
 
     return {
         "document_id": document.id,
@@ -1223,6 +1528,15 @@ def share_document(
         )
 
     if not check_document_ownership(document, current_user):
+        log_audit_event(
+            action=AuditEventType.ACTION_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason="Access forbidden: You can only share documents you own.",
+            metadata={"attempted_action": "SHARE_DOCUMENT"},
+            isolated=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access forbidden: You can only share documents you own.",
@@ -1273,6 +1587,21 @@ def share_document(
     db.commit()
     db.refresh(share)
 
+    # Audit log for document sharing
+    log_audit_event(
+        db=db,
+        action=AuditEventType.DOCUMENT_SHARED,
+        result=AuditResult.SUCCESS,
+        actor=current_user,
+        document=document,
+        metadata={
+            "shared_with_user_id": target_user.id,
+            "shared_with_name": target_user.name,
+            "shared_with_email": target_user.email,
+            "shared_with_role": target_user.role,
+        },
+    )
+
     return {
         "id": share.id,
         "document_id": document.id,
@@ -1282,7 +1611,7 @@ def share_document(
         "shared_with_role": target_user.role,
         "shared_by_user_id": current_user.id,
         "shared_by_name": current_user.name,
-        "created_at": share.created_at.isoformat() if share.created_at else None,
+        "created_at": format_utc_iso(share.created_at),
     }
 
 
@@ -1319,7 +1648,7 @@ def get_document_shares(
             "shared_with_role": target.role if target else "Unknown",
             "shared_by_user_id": s.shared_by_user_id,
             "shared_by_name": creator.name if creator else "Unknown",
-            "created_at": s.created_at.isoformat() if s.created_at else None,
+            "created_at": format_utc_iso(s.created_at),
         })
     return result
 
@@ -1339,6 +1668,15 @@ def revoke_document_share(
         )
 
     if not check_document_ownership(document, current_user):
+        log_audit_event(
+            action=AuditEventType.ACTION_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason="Access forbidden: You can only revoke shares for documents you own.",
+            metadata={"attempted_action": "REVOKE_SHARE", "share_id": share_id},
+            isolated=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access forbidden: You can only revoke shares for documents you own.",
@@ -1355,8 +1693,22 @@ def revoke_document_share(
             detail=f"Share with ID {share_id} not found for document #{document_id}",
         )
 
+    revoked_user_id = share.shared_with_user_id
     db.delete(share)
     db.commit()
+
+    # Audit log for share revocation
+    log_audit_event(
+        db=db,
+        action=AuditEventType.DOCUMENT_SHARE_REVOKED,
+        result=AuditResult.SUCCESS,
+        actor=current_user,
+        document=document,
+        metadata={
+            "share_id": share_id,
+            "revoked_user_id": revoked_user_id,
+        },
+    )
 
     return {
         "message": "Share revoked successfully",
@@ -1378,6 +1730,7 @@ def dev_reset_vault(
     - Deletes all document_shares records
     - Deletes all document records
     - Deletes all uploaded files in backend/uploads while preserving directory
+    - Clears existing audit records and records a single surviving VAULT_RESET event
     - Rejects execution if LEGALVAULT_ENV is set to production
     """
     current_env = os.getenv("LEGALVAULT_ENV", "development").strip().lower()
@@ -1388,6 +1741,7 @@ def dev_reset_vault(
         )
 
     # 1. Delete document versions and shares first (maintains foreign key integrity)
+    versions_count = db.query(DocumentVersion).count()
     db.query(DocumentVersion).delete()
     shares_count = db.query(DocumentShare).count()
     db.query(DocumentShare).delete()
@@ -1396,9 +1750,13 @@ def dev_reset_vault(
     docs_count = db.query(Document).count()
     db.query(Document).delete()
 
+    # 3. Clear existing audit records before creating the surviving reset event
+    audit_count = db.query(AuditLog).count()
+    db.query(AuditLog).delete()
+
     db.commit()
 
-    # 3. Delete all files in uploads directory while preserving the folder
+    # 4. Delete all files in uploads directory while preserving the folder
     files_deleted = 0
     if os.path.exists(UPLOAD_DIR):
         for filename in os.listdir(UPLOAD_DIR):
@@ -1410,9 +1768,133 @@ def dev_reset_vault(
                 except Exception:
                     pass
 
+    # 5. Create fresh VAULT_RESET audit log that survives the reset
+    log_audit_event(
+        db=db,
+        action=AuditEventType.VAULT_RESET,
+        result=AuditResult.SUCCESS,
+        actor=current_user,
+        reason="Development vault reset executed by Administrator",
+        metadata={
+            "documents_deleted": docs_count,
+            "versions_deleted": versions_count,
+            "shares_deleted": shares_count,
+            "files_deleted": files_deleted,
+        },
+    )
+
     return {
         "message": "Development vault reset successfully. All documents, shares, and off-chain files have been cleared while preserving users.",
         "documents_deleted": docs_count,
         "shares_deleted": shares_count,
         "files_deleted": files_deleted,
+        "audit_records_cleared": audit_count,
+    }
+
+
+# --- Audit Trail Endpoints ---
+
+@app.get("/documents/{document_id}/audit", response_model=DocumentAuditResponse)
+def get_document_audit_trail(
+    document_id: int,
+    limit: int = 50,
+    offset: int = 0,
+    action: str | None = None,
+    version_number: int | None = None,
+    result: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieves the forensic audit trail for a specific legal document.
+    Enforces strict access control:
+    - Document Owners (Lawyers) & Administrators have access.
+    - Judicial & Client users have access ONLY IF the document is actively shared with them.
+    - Unauthorized users receive 403 Forbidden with zero information leakage.
+    - Sensitive login IP/auth metadata is hidden in document-level views.
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to view the audit trail for document #{document_id}",
+            metadata={"attempted_action": "VIEW_DOCUMENT_AUDIT"},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: You do not have permission to view the audit trail for document #{document_id}",
+        )
+
+    query = db.query(AuditLog).filter(AuditLog.document_id == document_id)
+
+    if action:
+        query = query.filter(AuditLog.action == action.strip().upper())
+    if version_number is not None:
+        query = query.filter(AuditLog.version_number == version_number)
+    if result:
+        query = query.filter(AuditLog.result == result.strip().upper())
+
+    total_count = query.count()
+    events = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+
+    formatted_events = [
+        format_audit_event_response(e, is_system_view=False)
+        for e in events
+    ]
+
+    return {
+        "document_id": document_id,
+        "total_count": total_count,
+        "events": formatted_events,
+    }
+
+
+@app.get("/audit", response_model=SystemAuditResponse)
+def get_system_audit_trail(
+    limit: int = 50,
+    offset: int = 0,
+    action: str | None = None,
+    actor_id: int | None = None,
+    document_id: int | None = None,
+    result: str | None = None,
+    current_user: User = Depends(require_roles(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieves system-wide forensic audit logs across all users, dockets, and events.
+    - Strictly restricted to ADMIN role.
+    - Includes actor emails and IP addresses for security forensics.
+    """
+    query = db.query(AuditLog)
+
+    if action:
+        query = query.filter(AuditLog.action == action.strip().upper())
+    if actor_id is not None:
+        query = query.filter(AuditLog.actor_id == actor_id)
+    if document_id is not None:
+        query = query.filter(AuditLog.document_id == document_id)
+    if result:
+        query = query.filter(AuditLog.result == result.strip().upper())
+
+    total_count = query.count()
+    events = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+
+    formatted_events = [
+        format_audit_event_response(e, is_system_view=True)
+        for e in events
+    ]
+
+    return {
+        "total_count": total_count,
+        "events": formatted_events,
     }
