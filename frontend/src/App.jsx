@@ -18,15 +18,33 @@ function VaultWorkspace() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Dynamic live integrity verification state: { [docId]: { verified: bool, result: 'VERIFIED' | 'TAMPERED', timestamp } }
-  const [integrityResults, setIntegrityResults] = useState({});
+  // Dynamic live integrity verification state: { [docId]: { versions: { [vNum]: resultObj }, lastVerifiedVersion, ... } }
+  const [integrityResults, setIntegrityResults] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem('legalvault_integrity_cache');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
 
   // Modals state
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [verifyingDocId, setVerifyingDocId] = useState(null);
+  const [verifyingVersion, setVerifyingVersion] = useState(null);
   const [inspectingDocId, setInspectingDocId] = useState(null);
   const [sharingDoc, setSharingDoc] = useState(null);
   const [isResetOpen, setIsResetOpen] = useState(false);
+
+  const handleOpenVerify = (id, versionNumber = null) => {
+    setVerifyingDocId(id);
+    setVerifyingVersion(versionNumber);
+  };
+
+  const handleCloseVerify = () => {
+    setVerifyingDocId(null);
+    setVerifyingVersion(null);
+  };
 
   const loadData = useCallback(async () => {
     if (!isAuthenticated) return;
@@ -67,13 +85,33 @@ function VaultWorkspace() {
   };
 
   const handleVerificationComplete = (docId, result) => {
-    setIntegrityResults((prev) => ({
-      ...prev,
-      [docId]: result,
-    }));
+    const vNum = result.version_number || result.version || 1;
+    setIntegrityResults((prev) => {
+      const existingDoc = prev[docId] || {};
+      const existingVersions = existingDoc.versions || {};
+      const updated = {
+        ...prev,
+        [docId]: {
+          ...existingDoc,
+          versions: {
+            ...existingVersions,
+            [vNum]: result,
+          },
+          lastVerifiedVersion: vNum,
+          lastVerifiedResult: result,
+        },
+      };
+      try {
+        sessionStorage.setItem('legalvault_integrity_cache', JSON.stringify(updated));
+      } catch (e) {}
+      return updated;
+    });
   };
 
   const handleResetSuccess = () => {
+    try {
+      sessionStorage.removeItem('legalvault_integrity_cache');
+    } catch (e) {}
     setIntegrityResults({});
     loadData();
   };
@@ -198,7 +236,7 @@ function VaultWorkspace() {
           documents={documents}
           isLoading={isLoading}
           integrityResults={integrityResults}
-          onVerifyDocument={(id) => setVerifyingDocId(id)}
+          onVerifyDocument={(id) => handleOpenVerify(id)}
           onInspectDocument={(id) => setInspectingDocId(id)}
         />
       </main>
@@ -215,8 +253,9 @@ function VaultWorkspace() {
       {/* Hero Verification Modal */}
       <VerificationModal
         documentId={verifyingDocId}
+        versionIdentifier={verifyingVersion}
         isOpen={Boolean(verifyingDocId)}
-        onClose={() => setVerifyingDocId(null)}
+        onClose={handleCloseVerify}
         onVerificationComplete={handleVerificationComplete}
       />
 
@@ -225,8 +264,9 @@ function VaultWorkspace() {
         documentId={inspectingDocId}
         isOpen={Boolean(inspectingDocId)}
         onClose={() => setInspectingDocId(null)}
-        onVerify={(id) => setVerifyingDocId(id)}
+        onVerify={(id, versionNumber) => handleOpenVerify(id, versionNumber)}
         onOpenShare={(doc) => setSharingDoc(doc)}
+        integrityResults={integrityResults}
       />
 
       {/* Share Document Modal */}

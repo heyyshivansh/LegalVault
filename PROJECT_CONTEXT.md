@@ -190,7 +190,7 @@ IPFS may be considered later if time permits.
 - [x] Verification
 - [x] Access control (RBAC: Lawyer, Judge, Client, Admin)
 - [x] Sharing (Document sharing & permission management)
-- [ ] Version history
+- [x] Version history (Immutable revisions, per-version on-chain anchors, isolated historical storage & verification)
 - [ ] AI comparison
 - [ ] Documentation
 - [ ] Presentation
@@ -221,3 +221,36 @@ Priority:
 Working core > fancy features.
 
 The system must be understandable by the team and explainable to judges.
+
+---
+
+## Document Version History Architecture
+
+LegalVault implements immutable revision tracking for legal records:
+
+### 1. Data Model (`DocumentVersion`)
+- `(document_id, version_number)` is uniquely constrained (`uq_document_version`).
+- Indexed on `document_id` and `file_hash`.
+- Foreign key cascading on `document_id` and references `users.id` for depositor provenance.
+- Legacy records backfilled as `v1` during schema migrations without initiating blockchain transactions.
+
+### 2. Off-Chain File Isolation
+- Revision files are saved under `uploads/doc_{document_id}_v{version_number}_{sanitized_filename}` to ensure historical revisions are never overwritten or corrupted.
+
+### 3. Dual On-Chain Anchoring
+- **Version Anchor**: Each revision is anchored with key `"{document_id}_v{version_number}"` on `LegalVault.sol`.
+- **Master Anchor**: The latest master state is anchored under key `"{document_id}"`.
+- Supports per-version cryptographic verification (`POST /documents/{id}/versions/{version}/verify`).
+
+### 4. API Endpoints
+- `GET /documents/{id}/versions`: Lists all historical revisions with `is_current` indicators.
+- `GET /documents/{id}/versions/{version}`: Details of a specific revision.
+- `GET /documents/{id}/versions/{version}/download`: Downloads exact historical file.
+- `POST /documents/{id}/versions`: Uploads new immutable revision with validation, duplicate detection, and EVM anchoring.
+- `POST /documents/{id}/versions/{version}/verify`: Live verification of specific revision against on-chain hash.
+
+### 5. Automated Verification Suite
+Run the test suite:
+```bash
+python test_version_history.py
+```

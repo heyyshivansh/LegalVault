@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy.orm import relationship
 from datetime import datetime
 
 from database import Base
@@ -37,6 +38,37 @@ class Document(Base):
     blockchain_status = Column(String, nullable=True)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    versions = relationship(
+        "DocumentVersion",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        order_by="DocumentVersion.version_number.asc()",
+    )
+
+
+class DocumentVersion(Base):
+    __tablename__ = "document_versions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_number = Column(Integer, nullable=False)
+    filename = Column(String, nullable=False)
+    stored_filename = Column(String, nullable=False)
+    file_size = Column(Integer, nullable=False, default=0)
+    file_type = Column(String, nullable=True)
+    file_hash = Column(String, nullable=False, index=True)
+    uploaded_by = Column(String, nullable=False)
+    uploader_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    blockchain_tx_hash = Column(String, nullable=True)
+    blockchain_status = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "version_number", name="uq_document_version"),
+    )
+
+    document = relationship("Document", back_populates="versions")
 
 
 class DocumentShare(Base):

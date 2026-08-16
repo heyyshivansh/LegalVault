@@ -20,11 +20,14 @@ def run_tests():
     token = auth_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
+    import time
+    salt = str(int(time.time()))
+
     # --- TEST CASE A: ORIGINAL UNTAMPERED DOCUMENT ---
     print("\n[TEST CASE A] Original Document Verification...")
-    pdf_orig_bytes = b"%PDF-1.4 1 0 obj << /Type /Catalog >> endobj trailer << /Size 1 >> %%EOF"
+    pdf_orig_bytes = f"%PDF-1.4 1 0 obj << /Type /Catalog >> endobj trailer << /Size {salt} >> %%EOF".encode()
     files_a = {"file": ("original_verification_doc.pdf", pdf_orig_bytes, "application/pdf")}
-    data_a = {"case_number": "CASE-VERIFY-TEST-001", "uploaded_by": "Advocate Rajesh Sharma"}
+    data_a = {"case_number": f"CASE-VERIFY-TEST-{salt}", "uploaded_by": "Advocate Rajesh Sharma"}
     upload_a = requests.post(f"{BASE_URL}/documents/upload", files=files_a, data=data_a, headers=headers)
     assert upload_a.status_code == 200, f"Upload failed: {upload_a.text}"
     doc_a_id = upload_a.json()["document_id"]
@@ -43,12 +46,12 @@ def run_tests():
     # --- TEST CASE B: TAMPER DETECTION ON SEPARATE TEST DOCUMENT ---
     print("\n[TEST CASE B] Tamper Detection Test...")
     # 1. Upload a separate test document
-    pdf_tamper_orig = b"%PDF-1.4 1 0 obj << /Type /Catalog >> endobj trailer << /Size 1 >> %%EOF"
+    pdf_tamper_orig = f"%PDF-1.4 2 0 obj << /Type /TamperFixture >> endobj trailer << /Size {salt}B >> %%EOF".encode()
     files_b = {"file": ("tamper_fixture_doc.pdf", pdf_tamper_orig, "application/pdf")}
-    data_b = {"case_number": "CASE-TAMPER-TEST-002", "uploaded_by": "Tester"}
+    data_b = {"case_number": f"CASE-TAMPER-TEST-{salt}", "uploaded_by": "Tester"}
 
     upload_resp = requests.post(f"{BASE_URL}/documents/upload", files=files_b, data=data_b, headers=headers)
-    assert upload_resp.status_code == 200
+    assert upload_resp.status_code == 200, f"Upload failed: {upload_resp.text}"
     upload_json = upload_resp.json()
     tamper_doc_id = upload_json["document_id"]
     original_reg_hash = upload_json["file_hash"]

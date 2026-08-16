@@ -18,8 +18,13 @@ Base = declarative_base()
 
 
 def migrate_schema() -> None:
+    import os
+    from datetime import datetime
+
     inspector = inspect(engine)
-    if "documents" in inspector.get_table_names():
+    table_names = inspector.get_table_names()
+
+    if "documents" in table_names:
         existing_columns = {column["name"] for column in inspector.get_columns("documents")}
         migrations = {
             "blockchain_tx_hash": "ALTER TABLE documents ADD COLUMN blockchain_tx_hash VARCHAR",
@@ -31,6 +36,53 @@ def migrate_schema() -> None:
             for column_name, statement in migrations.items():
                 if column_name not in existing_columns:
                     connection.execute(text(statement))
+
+    # Backfill legacy documents into document_versions purely off-chain (no blockchain calls)
+    if "document_versions" in inspector.get_table_names() and "documents" in inspector.get_table_names():
+        from models import Document, DocumentVersion
+        db = SessionLocal()
+        try:
+            documents = db.query(Document).all()
+            for doc in documents:
+                existing_ver = db.query(DocumentVersion).filter(
+                    DocumentVersion.document_id == doc.id,
+                    DocumentVersion.version_number == (doc.version or 1),
+                ).first()
+
+                if not existing_ver:
+                    # Determine file size if file is available on disk
+                    file_size = 0
+                    upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
+                    fpath = os.path.join(upload_dir, doc.filename) if doc.filename else None
+                    if fpath and os.path.exists(fpath):
+                        try:
+                            file_size = os.path.getsize(fpath)
+                        except Exception:
+                            file_size = 0
+
+                    ext = os.path.splitext(doc.filename)[1].lower() if doc.filename else None
+
+                    v1 = DocumentVersion(
+                        document_id=doc.id,
+                        version_number=doc.version or 1,
+                        filename=doc.filename,
+                        stored_filename=doc.filename,
+                        file_size=file_size,
+                        file_type=ext,
+                        file_hash=doc.file_hash or "",
+                        uploaded_by=doc.uploaded_by or "Unknown",
+                        uploader_id=doc.owner_id,
+                        blockchain_tx_hash=doc.blockchain_tx_hash,
+                        blockchain_status=doc.blockchain_status or "pending",
+                        created_at=doc.created_at or datetime.utcnow(),
+                    )
+                    db.add(v1)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"[DB MIGRATION WARNING] Failed backfilling legacy document versions: {e}")
+        finally:
+            db.close()
 
 
 def seed_initial_users() -> None:

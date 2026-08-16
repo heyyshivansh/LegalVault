@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { downloadDocumentFile } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { getDocumentIntegrity } from '../utils/integrity';
 
 export default function DocumentList({
   documents = [],
@@ -149,7 +150,7 @@ export default function DocumentList({
               </tr>
             ) : (
               filteredDocs.map((doc) => {
-                const integrity = integrityResults[doc.id];
+                const integrity = getDocumentIntegrity(doc.id, integrityResults);
                 return (
                   <tr key={doc.id}>
                     <td className="case-id-cell">#{doc.id}</td>
@@ -158,7 +159,22 @@ export default function DocumentList({
                     </td>
                     <td>
                       <div className="doc-name-cell">
-                        <span className="doc-name-primary">{doc.filename}</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                          <span className="doc-name-primary">{doc.filename}</span>
+                          <span
+                            className="badge"
+                            style={{
+                              fontSize: '0.65rem',
+                              padding: '0.05rem 0.35rem',
+                              backgroundColor: '#EEF2FF',
+                              color: '#3730A3',
+                              border: '1px solid #C7D2FE',
+                              fontWeight: 600,
+                            }}
+                          >
+                            v{doc.version || 1}
+                          </span>
+                        </div>
                         <span className="doc-hash-snippet" title={doc.file_hash}>
                           SHA256: {truncateHash(doc.file_hash)}
                         </span>
@@ -193,35 +209,74 @@ export default function DocumentList({
                       )}
                     </td>
                     <td>
-                      {integrity ? (
-                        integrity.result === 'VERIFIED' ? (
-                          <span
-                            className="badge"
-                            style={{
-                              backgroundColor: '#ECFDF5',
-                              color: '#047857',
-                              border: '1px solid #A7F3D0',
-                              fontWeight: 600,
-                              fontSize: '0.72rem',
-                            }}
-                            title="Cryptographic verification confirmed on-disk hash matches blockchain ledger"
-                          >
-                            ✓ VERIFIED
-                          </span>
+                      {integrity.hasResults ? (
+                        integrity.status === 'VERIFIED' ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                            <span
+                              className="badge"
+                              style={{
+                                backgroundColor: '#ECFDF5',
+                                color: '#047857',
+                                border: '1px solid #A7F3D0',
+                                fontWeight: 700,
+                                fontSize: '0.72rem',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '0.25rem',
+                              }}
+                              title={`Cryptographically verified against blockchain for ${integrity.affectedLabel}`}
+                            >
+                              ✓ VERIFIED
+                            </span>
+                            <span style={{ fontSize: '0.68rem', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}>
+                              {integrity.verifiedVersions.length >= (doc.version || 1) && (doc.version || 1) > 1
+                                ? 'All versions'
+                                : (doc.version || 1) === 1
+                                ? 'v1'
+                                : integrity.affectedLabel}
+                            </span>
+                          </div>
+                        ) : integrity.status === 'BLOCKCHAIN_PROOF_UNAVAILABLE' ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                            <span
+                              className="badge"
+                              style={{
+                                backgroundColor: '#FEF3C7',
+                                color: '#92400E',
+                                border: '1px solid #FCD34D',
+                                fontWeight: 700,
+                                fontSize: '0.72rem',
+                              }}
+                              title={`Blockchain proof missing on connected chain for ${integrity.affectedLabel}`}
+                            >
+                              ⚠ PROOF UNAVAILABLE
+                            </span>
+                            <span style={{ fontSize: '0.68rem', color: '#92400E', fontFamily: 'var(--font-mono)' }}>
+                              {integrity.affectedLabel}
+                            </span>
+                          </div>
                         ) : (
-                          <span
-                            className="badge"
-                            style={{
-                              backgroundColor: '#FEF2F2',
-                              color: '#B91C1C',
-                              border: '1px solid #FECACA',
-                              fontWeight: 700,
-                              fontSize: '0.72rem',
-                            }}
-                            title="WARNING: On-disk file hash differs from canonical on-chain registration"
-                          >
-                            ⚠ TAMPERED
-                          </span>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                            <span
+                              className="badge"
+                              style={{
+                                backgroundColor: '#FEF2F2',
+                                color: '#B91C1C',
+                                border: '1px solid #FECACA',
+                                fontWeight: 700,
+                                fontSize: '0.72rem',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '0.25rem',
+                              }}
+                              title={`WARNING: Integrity mismatch detected in version ${integrity.affectedLabel}`}
+                            >
+                              ⚠ TAMPERED
+                            </span>
+                            <span style={{ fontSize: '0.68rem', color: '#B91C1C', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>
+                              Affected: {integrity.affectedLabel}
+                            </span>
+                          </div>
                         )
                       ) : (
                         <span style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>

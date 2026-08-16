@@ -1,6 +1,10 @@
 import React, { useState, useRef } from 'react';
 import { uploadDocument } from '../services/api';
 
+const ALLOWED_EXTENSIONS = ['.pdf', '.txt', '.docx', '.jpg', '.jpeg', '.png'];
+const MAX_FILE_SIZE_MB = 10;
+const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
+
 export default function DocumentUploadModal({ isOpen, onClose, onUploadSuccess }) {
   const [file, setFile] = useState(null);
   const [clientHash, setClientHash] = useState('');
@@ -9,11 +13,27 @@ export default function DocumentUploadModal({ isOpen, onClose, onUploadSuccess }
   const [uploadedBy, setUploadedBy] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [duplicateData, setDuplicateData] = useState(null);
   const [uploadResult, setUploadResult] = useState(null);
 
   const fileInputRef = useRef(null);
 
   if (!isOpen) return null;
+
+  const validateFile = (selectedFile) => {
+    const filename = selectedFile.name.toLowerCase();
+    const ext = filename.lastIndexOf('.') !== -1 ? filename.substring(filename.lastIndexOf('.')) : '';
+
+    if (!ALLOWED_EXTENSIONS.includes(ext)) {
+      return `Unsupported file format '${ext}'. Allowed formats: ${ALLOWED_EXTENSIONS.join(', ')}`;
+    }
+
+    if (selectedFile.size > MAX_FILE_SIZE_BYTES) {
+      return `File exceeds maximum allowed size of ${MAX_FILE_SIZE_MB} MB (${(selectedFile.size / (1024 * 1024)).toFixed(2)} MB).`;
+    }
+
+    return null;
+  };
 
   // Compute SHA-256 in browser using Web Crypto API
   const calculateSha256 = async (selectedFile) => {
@@ -35,9 +55,18 @@ export default function DocumentUploadModal({ isOpen, onClose, onUploadSuccess }
   const handleFileChange = (e) => {
     const selected = e.target.files?.[0];
     if (selected) {
+      const validationError = validateFile(selected);
+      if (validationError) {
+        setErrorMessage(validationError);
+        setFile(null);
+        setClientHash('');
+        setDuplicateData(null);
+        return;
+      }
       setFile(selected);
-      calculateSha256(selected);
       setErrorMessage('');
+      setDuplicateData(null);
+      calculateSha256(selected);
     }
   };
 
@@ -46,9 +75,18 @@ export default function DocumentUploadModal({ isOpen, onClose, onUploadSuccess }
     e.stopPropagation();
     const dropped = e.dataTransfer.files?.[0];
     if (dropped) {
+      const validationError = validateFile(dropped);
+      if (validationError) {
+        setErrorMessage(validationError);
+        setFile(null);
+        setClientHash('');
+        setDuplicateData(null);
+        return;
+      }
       setFile(dropped);
-      calculateSha256(dropped);
       setErrorMessage('');
+      setDuplicateData(null);
+      calculateSha256(dropped);
     }
   };
 
@@ -57,8 +95,15 @@ export default function DocumentUploadModal({ isOpen, onClose, onUploadSuccess }
     e.stopPropagation();
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const formatFileSize = (bytes) => {
+    if (!bytes) return '0 B';
+    if (bytes < 1024 * 1024) {
+      return `${(bytes / 1024).toFixed(1)} KB`;
+    }
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  };
+
+  const performDeposit = async (allowDuplicate = false) => {
     if (!file) {
       setErrorMessage('Please select a legal document to deposit.');
       return;
@@ -74,12 +119,14 @@ export default function DocumentUploadModal({ isOpen, onClose, onUploadSuccess }
 
     setIsSubmitting(true);
     setErrorMessage('');
+    setDuplicateData(null);
 
     try {
       const result = await uploadDocument({
         file,
         caseNumber: caseNumber.trim(),
         uploadedBy: uploadedBy.trim(),
+        allowDuplicate,
       });
 
       setUploadResult(result);
@@ -87,10 +134,20 @@ export default function DocumentUploadModal({ isOpen, onClose, onUploadSuccess }
         onUploadSuccess(result);
       }
     } catch (err) {
-      setErrorMessage(err.message || 'Deposit failed. Please ensure the backend and blockchain are connected.');
+      if (err.status === 409 || err.data?.code === 'DUPLICATE_DOCUMENT') {
+        const existingDoc = err.data?.existing_document;
+        setDuplicateData(existingDoc || { file_hash: clientHash });
+      } else {
+        setErrorMessage(err.message || 'Deposit failed. Please ensure the backend and blockchain are connected.');
+      }
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    performDeposit(false);
   };
 
   const handleReset = () => {
@@ -99,6 +156,7 @@ export default function DocumentUploadModal({ isOpen, onClose, onUploadSuccess }
     setCaseNumber('');
     setUploadedBy('');
     setErrorMessage('');
+    setDuplicateData(null);
     setUploadResult(null);
   };
 
@@ -183,9 +241,60 @@ export default function DocumentUploadModal({ isOpen, onClose, onUploadSuccess }
                 </div>
               )}
 
+              {/* Duplicate Document Detection Warning Banner */}
+              {duplicateData && (
+                <div style={{ backgroundColor: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 'var(--radius-xs)', padding: '1rem', marginBottom: '1.25rem' }}>
+                  <div style={{ fontWeight: 700, fontSize: '0.85rem', color: '#92400E', marginBottom: '0.35rem' }}>
+                    ⚠ DUPLICATE CONTENT DETECTED
+                  </div>
+                  <div style={{ fontSize: '0.82rem', color: '#78350F', lineHeight: 1.45, marginBottom: '0.75rem' }}>
+                    A legal record with an identical cryptographic SHA-256 hash is already anchored in the vault:
+                  </div>
+
+                  <div style={{ backgroundColor: '#FFFFFF', border: '1px solid #FDE68A', padding: '0.65rem 0.85rem', borderRadius: 'var(--radius-xs)', fontSize: '0.8rem', color: 'var(--ink-primary)', marginBottom: '0.85rem' }}>
+                    <div><strong>Existing Record ID:</strong> #{duplicateData.id || 'N/A'}</div>
+                    <div><strong>Case Reference:</strong> {duplicateData.case_number || 'N/A'}</div>
+                    <div><strong>Original Filename:</strong> {duplicateData.filename || 'N/A'}</div>
+                    <div><strong>Deposited By:</strong> {duplicateData.uploaded_by || 'N/A'}</div>
+                    <div style={{ marginTop: '0.35rem' }}>
+                      <strong>Matching SHA-256:</strong>
+                      <span className="hash-tag" style={{ display: 'block', marginTop: '0.2rem', wordBreak: 'break-all' }}>
+                        {duplicateData.file_hash}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: '0.78rem', color: '#92400E', marginBottom: '0.85rem' }}>
+                    Identical evidentiary bytes may legitimately pertain to separate proceedings. Would you like to proceed with a distinct docket registration?
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'flex-end' }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setDuplicateData(null)}
+                      disabled={isSubmitting}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      style={{ backgroundColor: '#B45309', borderColor: '#B45309' }}
+                      onClick={() => performDeposit(true)}
+                      disabled={isSubmitting}
+                    >
+                      {isSubmitting ? 'Anchoring Duplicate...' : 'Deposit Anyway (Anchor Distinct Docket)'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* File Dropzone */}
               <div className="form-group">
-                <label className="form-label">Legal Document File (.pdf, .docx, .txt)</label>
+                <label className="form-label">
+                  Legal Document File ({ALLOWED_EXTENSIONS.join(', ')} · Max {MAX_FILE_SIZE_MB} MB)
+                </label>
                 <div
                   className="dropzone"
                   onDrop={handleDrop}
@@ -196,6 +305,7 @@ export default function DocumentUploadModal({ isOpen, onClose, onUploadSuccess }
                     ref={fileInputRef}
                     type="file"
                     style={{ display: 'none' }}
+                    accept={ALLOWED_EXTENSIONS.join(',')}
                     onChange={handleFileChange}
                   />
                   {file ? (
@@ -204,14 +314,14 @@ export default function DocumentUploadModal({ isOpen, onClose, onUploadSuccess }
                         {file.name}
                       </div>
                       <div className="dropzone-subtitle">
-                        {(file.size / 1024).toFixed(1)} KB · Click to change file
+                        {formatFileSize(file.size)} · Click to change file
                       </div>
                     </div>
                   ) : (
                     <div>
                       <div className="dropzone-title">Click to select or drag and drop legal document</div>
                       <div className="dropzone-subtitle">
-                        Supported formats: PDF, DOCX, TXT, scanned court dockets
+                        Supported formats: PDF, DOCX, TXT, JPG, PNG (Max {MAX_FILE_SIZE_MB} MB)
                       </div>
                     </div>
                   )}
@@ -279,7 +389,7 @@ export default function DocumentUploadModal({ isOpen, onClose, onUploadSuccess }
               <button
                 type="submit"
                 className="btn btn-primary"
-                disabled={isSubmitting || !file}
+                disabled={isSubmitting || !file || isHashing || Boolean(duplicateData)}
               >
                 {isSubmitting ? 'Registering on Blockchain...' : 'Deposit & Anchor Record'}
               </button>

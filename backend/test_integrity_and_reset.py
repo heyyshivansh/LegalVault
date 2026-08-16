@@ -32,11 +32,14 @@ def run_tests():
 
     print("\n[1] Authentication verified for Lawyer, Judge, Client, and Admin.")
 
+    import time
+    salt = str(int(time.time()))
+
     # 2. Deposit test document
     print("\n[2] Lawyer deposits test document (integrity_lifecycle_doc.pdf)...")
-    original_pdf_bytes = b"%PDF-1.4 Canonical Unaltered Evidentiary Record 2026 %%EOF"
+    original_pdf_bytes = f"%PDF-1.4 Canonical Unaltered Evidentiary Record {salt} %%EOF".encode()
     files = {"file": ("integrity_lifecycle_doc.pdf", original_pdf_bytes, "application/pdf")}
-    data = {"case_number": "CASE-INTEGRITY-CYCLE-2026", "uploaded_by": "Advocate Rajesh Sharma"}
+    data = {"case_number": f"CASE-INTEGRITY-CYCLE-{salt}", "uploaded_by": "Advocate Rajesh Sharma"}
     upload_resp = requests.post(f"{BASE_URL}/documents/upload", files=files, data=data, headers=lawyer_headers)
     assert upload_resp.status_code == 200, f"Upload failed: {upload_resp.text}"
     doc_id = upload_resp.json()["document_id"]
