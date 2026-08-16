@@ -4,6 +4,7 @@ import time
 import json
 import sqlite3
 import requests
+from unittest.mock import patch, MagicMock
 from pypdf import PdfWriter, PdfReader
 
 BASE_URL = "http://127.0.0.1:8000"
@@ -95,7 +96,16 @@ def run_ai_metadata_tests():
 
     # 3. Unit test text extraction pipeline
     print("\n[3] Testing Text Extraction Pipeline (PDF / TXT / Image-only)...")
-    from ai_extractor import AIExtractor, MockProvider, normalize_extracted_schema
+    from ai_extractor import (
+        AIExtractor,
+        MockProvider,
+        GeminiProvider,
+        AIConfigurationError,
+        AIServiceError,
+        AITimeoutError,
+        AIParsingError,
+        normalize_extracted_schema,
+    )
 
     # 3a. Plain text extraction
     txt_sample = (
@@ -256,6 +266,123 @@ def run_ai_metadata_tests():
     assert extractor_mock.provider_name == "mock"
     assert extractor_mock.model_name == "offline-heuristics"
     print("    [OK] Test 9: MockProvider identity set strictly to 'mock' / 'offline-heuristics'.")
+
+    # 4b. Negative Document Anti-Hallucination Test
+    print("\n[4b] Testing Negative Document Anti-Hallucination Guarantees...")
+    neg_doc_text = (
+        "The defendant owns agricultural land near Kanpur.\n"
+        "The document does not contain a case number, court name, jurisdiction declaration, hearing date, or formal subject heading."
+    )
+    neg_meta = mock_prov.extract_metadata(neg_doc_text)
+    assert neg_meta["case_number"] is None, "Negative doc must not invent a case number"
+    assert neg_meta["court"] is None, "Negative doc must not invent a court"
+    assert neg_meta["subject"] is None, "Negative doc must not invent a subject"
+    assert len(neg_meta["dates"]) == 0, "Negative doc must not invent dates"
+    assert "land dispute" not in neg_meta["keywords"]
+    assert "property dispute" not in neg_meta["keywords"]
+    print("    [OK] Negative document produced zero invented case numbers, courts, subjects, dates, or dispute keywords.")
+
+    # 4c. Gemini Provider Architecture & Error Handling Tests
+    print("\n[4c] Testing Gemini Provider Contract & Failure Isolation...")
+    # Missing API Key
+    try:
+        GeminiProvider(api_key="")
+        assert False, "GeminiProvider must raise AIConfigurationError when API key is empty"
+    except AIConfigurationError:
+        print("    [OK] Missing API key raises AIConfigurationError.")
+
+    # Invalid API Key (Network / API Error from Google)
+    try:
+        prov_bad_key = GeminiProvider(api_key="AIzaSyInvalidKeyTest12345")
+        prov_bad_key.extract_metadata("Sample text")
+    except AIServiceError as e:
+        assert "Gemini API error" in str(e)
+        print("    [OK] Invalid API key safely caught as AIServiceError.")
+
+    # Provider Timeout Handling
+    prov_mock = GeminiProvider(api_key="mock_key")
+    with patch("requests.post", side_effect=requests.exceptions.Timeout("Connection timed out")):
+        try:
+            prov_mock.extract_metadata("Sample text")
+            assert False, "Expected AITimeoutError"
+        except AITimeoutError:
+            print("    [OK] Timeout properly caught as AITimeoutError.")
+
+    # Malformed JSON Handling
+    bad_json_resp = MagicMock()
+    bad_json_resp.status_code = 200
+    bad_json_resp.json.return_value = {"candidates": [{"content": {"parts": [{"text": "{ not valid json"}]}}]}
+    with patch("requests.post", return_value=bad_json_resp):
+        try:
+            prov_mock.extract_metadata("Sample text")
+            assert False, "Expected AIParsingError"
+        except AIParsingError:
+            print("    [OK] Malformed JSON response properly caught as AIParsingError.")
+
+    # Empty candidate list
+    empty_cand_resp = MagicMock()
+    empty_cand_resp.status_code = 200
+    empty_cand_resp.json.return_value = {"candidates": []}
+    with patch("requests.post", return_value=empty_cand_resp):
+        try:
+            prov_mock.extract_metadata("Sample text")
+            assert False, "Expected AIParsingError"
+        except AIParsingError:
+            print("    [OK] Empty candidate response properly caught as AIParsingError.")
+
+    # Valid Structured Response Simulation
+    simulated_gemini_json = json.dumps({
+        "document_type": "Affidavit",
+        "case_number": "CIV-2026-104",
+        "court": "District Court of Kanpur Nagar",
+        "jurisdiction": "Uttar Pradesh",
+        "parties": [{"name": "Rajesh Sharma", "role": "Deponent"}],
+        "dates": [{"date": "2026-08-14", "description": "Filing Date"}],
+        "subject": "Affidavit of ownership and physical possession of agricultural land in Kalyanpur",
+        "keywords": ["ownership", "possession", "agricultural land", "title transfer", "evidentiary documents"],
+        "confidence": {
+            "overall": 0.95,
+            "fields": {
+                "document_type": 0.98,
+                "case_number": 0.97,
+                "court": 0.95,
+                "jurisdiction": 0.95,
+                "parties": 0.92,
+                "dates": 0.90,
+                "subject": 0.94
+            }
+        }
+    })
+    valid_resp = MagicMock()
+    valid_resp.status_code = 200
+    valid_resp.json.return_value = {"candidates": [{"content": {"parts": [{"text": simulated_gemini_json}]}}]}
+    with patch("requests.post", return_value=valid_resp):
+        gemini_parsed = prov_mock.extract_metadata("Sample text")
+        assert gemini_parsed["document_type"] == "Affidavit"
+        assert gemini_parsed["case_number"] == "CIV-2026-104"
+        assert gemini_parsed["court"] == "District Court of Kanpur Nagar"
+        assert gemini_parsed["jurisdiction"] == "Uttar Pradesh"
+        assert "summary_snippet" not in gemini_parsed
+        print("    [OK] Valid Gemini structured response parsed and normalized to schema.")
+
+    # 4d. Optional Live Gemini Test (if GEMINI_API_KEY is configured in environment)
+    real_api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if real_api_key and len(real_api_key) > 10:
+        print("\n[4d] LIVE GEMINI API KEY DETECTED! Executing Live Extraction Test...")
+        try:
+            live_prov = GeminiProvider(api_key=real_api_key, model=os.getenv("LEGALVAULT_AI_MODEL", "gemini-2.0-flash"))
+            live_meta = live_prov.extract_metadata(latest_test_fixture)
+            print(f"    [LIVE GEMINI OK] Document Type: {live_meta.get('document_type')}")
+            print(f"    [LIVE GEMINI OK] Case Number:   {live_meta.get('case_number')}")
+            print(f"    [LIVE GEMINI OK] Court:         {live_meta.get('court')}")
+            print(f"    [LIVE GEMINI OK] Jurisdiction:  {live_meta.get('jurisdiction')}")
+            print(f"    [LIVE GEMINI OK] Subject:       {live_meta.get('subject')}")
+            print(f"    [LIVE GEMINI OK] Keywords:      {live_meta.get('keywords')}")
+            print(f"    [LIVE GEMINI OK] Confidence:    {live_meta.get('confidence', {}).get('overall')}")
+        except Exception as e:
+            print(f"    [LIVE GEMINI NOTE] Live call encountered: {e}")
+    else:
+        print("\n[4d] (Note: GEMINI_API_KEY is not set locally; verified via isolated contract tests).")
 
     # 5. Integration: Document Upload (v1) and AI Metadata Extraction
     print("\n[5] Testing Initial Upload (v1) and Metadata Extraction Endpoint...")
