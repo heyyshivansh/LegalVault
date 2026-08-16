@@ -12,6 +12,11 @@ import {
   fetchVersionMetadata,
   generateVersionSummary,
   fetchVersionSummary,
+  compareDocumentVersions,
+  fetchDocumentVersionComparison,
+  generateVersionTimeline,
+  fetchVersionTimeline,
+  fetchDocumentTimeline,
 } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { getVersionIntegrity } from '../utils/integrity';
@@ -47,6 +52,21 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
   const [generatingSummaryVer, setGeneratingSummaryVer] = useState(null);
   const [summaryError, setSummaryError] = useState(null);
 
+  // AI Evidence Timeline State
+  const [selectedTimelineVersion, setSelectedTimelineVersion] = useState(1);
+  const [timelineMap, setTimelineMap] = useState({});
+  const [loadingTimelineVer, setLoadingTimelineVer] = useState(null);
+  const [generatingTimelineVer, setGeneratingTimelineVer] = useState(null);
+  const [timelineError, setTimelineError] = useState(null);
+
+  // AI Version Comparison State
+  const [fromCompareVer, setFromCompareVer] = useState(1);
+  const [toCompareVer, setToCompareVer] = useState(2);
+  const [comparisonMap, setComparisonMap] = useState({});
+  const [loadingComparisonKey, setLoadingComparisonKey] = useState(null);
+  const [runningComparisonKey, setRunningComparisonKey] = useState(null);
+  const [comparisonError, setComparisonError] = useState(null);
+
   // Audit Trail State
   const [auditEvents, setAuditEvents] = useState([]);
   const [auditTotal, setAuditTotal] = useState(0);
@@ -66,14 +86,17 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
   const fileInputRef = useRef(null);
   const revisionSectionRef = useRef(null);
 
-  useEffect(() => {
-    if (isUploadRevisionOpen && revisionSectionRef.current) {
-      revisionSectionRef.current.scrollIntoView({
-        behavior: 'smooth',
-        block: 'start',
-      });
-    }
-  }, [isUploadRevisionOpen]);
+  const handleOpenRevisionUpload = useCallback(() => {
+    setIsUploadRevisionOpen(true);
+    requestAnimationFrame(() => {
+      if (revisionSectionRef.current) {
+        revisionSectionRef.current.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        });
+      }
+    });
+  }, []);
 
   const resetRevisionForm = useCallback(() => {
     setRevisionFile(null);
@@ -144,6 +167,67 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
     }
   };
 
+  const loadVersionTimeline = useCallback(async (versionNum) => {
+    if (!documentId || !versionNum) return;
+    setLoadingTimelineVer(versionNum);
+    setTimelineError(null);
+    try {
+      const data = await fetchVersionTimeline(documentId, versionNum);
+      setTimelineMap((prev) => ({ ...prev, [versionNum]: data }));
+    } catch (err) {
+      console.warn(`Failed to load AI timeline for v${versionNum}:`, err);
+    } finally {
+      setLoadingTimelineVer(null);
+    }
+  }, [documentId]);
+
+  const handleGenerateTimeline = async (versionNum, force = false) => {
+    if (!documentId || !versionNum) return;
+    setGeneratingTimelineVer(versionNum);
+    setTimelineError(null);
+    try {
+      const data = await generateVersionTimeline(documentId, versionNum, force);
+      setTimelineMap((prev) => ({ ...prev, [versionNum]: data }));
+      // Refresh audit trail
+      loadAuditTrail();
+    } catch (err) {
+      setTimelineError(err.message || 'AI timeline extraction failed.');
+    } finally {
+      setGeneratingTimelineVer(null);
+    }
+  };
+
+  const loadVersionComparison = useCallback(async (fromV, toV) => {
+    if (!documentId || !fromV || !toV) return;
+    const key = `${fromV}->${toV}`;
+    setLoadingComparisonKey(key);
+    setComparisonError(null);
+    try {
+      const data = await fetchDocumentVersionComparison(documentId, fromV, toV);
+      setComparisonMap((prev) => ({ ...prev, [key]: data }));
+    } catch (err) {
+      console.warn(`Failed to load comparison for ${key}:`, err);
+    } finally {
+      setLoadingComparisonKey(null);
+    }
+  }, [documentId]);
+
+  const handleRunComparison = async (fromV, toV, force = false) => {
+    if (!documentId || !fromV || !toV) return;
+    const key = `${fromV}->${toV}`;
+    setRunningComparisonKey(key);
+    setComparisonError(null);
+    try {
+      const data = await compareDocumentVersions(documentId, fromV, toV, force);
+      setComparisonMap((prev) => ({ ...prev, [key]: data }));
+      loadAuditTrail();
+    } catch (err) {
+      setComparisonError(err.message || `AI comparison between Version ${fromV} and Version ${toV} failed.`);
+    } finally {
+      setRunningComparisonKey(null);
+    }
+  };
+
   const loadAuditTrail = useCallback(async (actionFilter = auditActionFilter, versionFilter = auditVersionFilter) => {
     if (!documentId) return;
     setAuditLoading(true);
@@ -176,11 +260,25 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
       const activeVer = data.version || 1;
       setSelectedMetaVersion(activeVer);
       setSelectedSummaryVersion(activeVer);
+      setSelectedTimelineVersion(activeVer);
 
       // Load Version History
       try {
         const vList = await fetchDocumentVersions(documentId);
         setVersions(vList);
+        if (vList && vList.length >= 2) {
+          const vFrom = vList[0].version_number;
+          const vTo = vList[vList.length - 1].version_number;
+          setFromCompareVer(vFrom);
+          setToCompareVer(vTo);
+          try {
+            const compData = await fetchDocumentVersionComparison(documentId, vFrom, vTo);
+            const compKey = `${vFrom}->${vTo}`;
+            setComparisonMap((prev) => ({ ...prev, [compKey]: compData }));
+          } catch {
+            // Not generated yet
+          }
+        }
       } catch (err) {
         console.warn('Failed to load version history:', err);
         setVersions([]);
@@ -200,6 +298,14 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
         setSummaryMap((prev) => ({ ...prev, [activeVer]: summaryData }));
       } catch (err) {
         console.warn('Failed to load active version AI summary:', err);
+      }
+
+      // Load AI Evidence Timeline for the active version
+      try {
+        const timelineData = await fetchVersionTimeline(documentId, activeVer);
+        setTimelineMap((prev) => ({ ...prev, [activeVer]: timelineData }));
+      } catch (err) {
+        console.warn('Failed to load active version AI timeline:', err);
       }
 
       // If owner or admin, load active shares
@@ -248,6 +354,18 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
       setMetaError(null);
       setExtractingMetaVer(null);
       setLoadingMetaVer(null);
+      setSummaryMap({});
+      setSummaryError(null);
+      setGeneratingSummaryVer(null);
+      setLoadingSummaryVer(null);
+      setTimelineMap({});
+      setTimelineError(null);
+      setGeneratingTimelineVer(null);
+      setLoadingTimelineVer(null);
+      setComparisonMap({});
+      setComparisonError(null);
+      setRunningComparisonKey(null);
+      setLoadingComparisonKey(null);
     }
   }, [isOpen, documentId, loadDetail, resetRevisionForm]);
 
@@ -515,7 +633,7 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
                     <button
                       type="button"
                       className="btn btn-primary btn-sm"
-                      onClick={() => setIsUploadRevisionOpen(true)}
+                      onClick={handleOpenRevisionUpload}
                       title="Upload a new immutable version for this legal document"
                     >
                       + Upload New Revision
@@ -1073,6 +1191,814 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
                 })()}
               </div>
 
+              {/* AI Evidence Timeline Section */}
+              <div style={{ backgroundColor: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: 'var(--radius-sm)', padding: '1.25rem', marginBottom: '1.5rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                    <span style={{ fontSize: '1rem', color: 'var(--accent-gold)' }}>⏳</span>
+                    <span className="serif-heading" style={{ fontSize: '1.05rem', color: 'var(--accent-navy)' }}>
+                      AI Evidence Timeline
+                    </span>
+                    <span className="badge" style={{ backgroundColor: '#F8FAFC', color: 'var(--ink-secondary)', border: '1px solid #CBD5E1', fontSize: '0.7rem' }}>
+                      REVISION V{selectedTimelineVersion}
+                    </span>
+                  </div>
+
+                  {/* Version Selector (if multiple versions exist) */}
+                  {versions.length > 1 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                      <span style={{ fontSize: '0.72rem', color: 'var(--ink-muted)' }}>Timeline Version:</span>
+                      {versions.map((v) => (
+                        <button
+                          key={`tl-v-${v.version_number}`}
+                          type="button"
+                          onClick={() => {
+                            setSelectedTimelineVersion(v.version_number);
+                            if (!timelineMap[v.version_number]) {
+                              loadVersionTimeline(v.version_number);
+                            }
+                          }}
+                          className={`btn btn-sm ${selectedTimelineVersion === v.version_number ? 'btn-primary' : 'btn-secondary'}`}
+                          style={{ fontSize: '0.72rem', padding: '0.15rem 0.5rem' }}
+                        >
+                          v{v.version_number}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Evidentiary Notice Disclaimer */}
+                <div style={{ backgroundColor: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 'var(--radius-xs)', padding: '0.5rem 0.75rem', fontSize: '0.73rem', color: 'var(--ink-secondary)', marginBottom: '1rem' }}>
+                  ℹ <strong>Evidentiary Notice:</strong> AI-generated timeline is an informational chronology derived from document text. It does not constitute verified legal evidence or legal advice.
+                </div>
+
+                {/* Timeline Error */}
+                {timelineError && (
+                  <div style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 'var(--radius-xs)', padding: '0.65rem 0.85rem', color: '#991B1B', fontSize: '0.8rem', marginBottom: '1rem' }}>
+                    ✕ {timelineError}
+                  </div>
+                )}
+
+                {/* State Rendering */}
+                {(() => {
+                  const currentTimeline = timelineMap[selectedTimelineVersion];
+                  const isGeneratingThis = generatingTimelineVer === selectedTimelineVersion;
+                  const isLoadingThis = loadingTimelineVer === selectedTimelineVersion;
+
+                  if (isGeneratingThis || isLoadingThis) {
+                    return (
+                      <div style={{ padding: '2rem 1rem', textAlign: 'center' }}>
+                        <div className="spinner" style={{ margin: '0 auto 0.75rem' }} />
+                        <div style={{ fontSize: '0.85rem', color: 'var(--ink-secondary)', fontWeight: 600 }}>
+                          {isGeneratingThis ? 'Extracting chronological events...' : `Loading Timeline for Revision v${selectedTimelineVersion}...`}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (!currentTimeline || currentTimeline.status === 'NOT_GENERATED') {
+                    return (
+                      <div style={{ textAlign: 'center', padding: '1.5rem 1rem', backgroundColor: '#F8FAFC', borderRadius: 'var(--radius-xs)', border: '1px dashed #CBD5E1' }}>
+                        <p style={{ fontSize: '0.85rem', color: 'var(--ink-secondary)', marginBottom: '1rem' }}>
+                          Timeline has not been generated for Revision v{selectedTimelineVersion}.
+                        </p>
+                        {canManageDoc ? (
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            style={{ fontSize: '0.82rem' }}
+                            onClick={() => handleGenerateTimeline(selectedTimelineVersion, false)}
+                          >
+                            ⚡ Generate Evidence Timeline
+                          </button>
+                        ) : (
+                          <span style={{ fontSize: '0.78rem', color: 'var(--ink-muted)' }}>
+                            Only the document owner or an administrator can generate the AI timeline.
+                          </span>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  if (currentTimeline.status === 'EXTRACTION_UNAVAILABLE') {
+                    return (
+                      <div style={{ textAlign: 'center', padding: '1.25rem', backgroundColor: '#FFFBEB', borderRadius: 'var(--radius-xs)', border: '1px solid #FDE68A' }}>
+                        <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#92400E', marginBottom: '0.35rem' }}>
+                          Text Extraction Unavailable
+                        </div>
+                        <p style={{ fontSize: '0.78rem', color: '#B45309', margin: 0 }}>
+                          {currentTimeline.error_message || 'Could not extract text from this revision file.'}
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  if (currentTimeline.status === 'EXTRACTION_LIMIT_EXCEEDED') {
+                    return (
+                      <div style={{ textAlign: 'center', padding: '1.25rem', backgroundColor: '#FEF2F2', borderRadius: 'var(--radius-xs)', border: '1px solid #FECACA' }}>
+                        <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#991B1B', marginBottom: '0.35rem' }}>
+                          AI Processing Limit Exceeded
+                        </div>
+                        <p style={{ fontSize: '0.78rem', color: '#B91C1C', margin: 0 }}>
+                          {currentTimeline.error_message || 'Document text exceeds maximum AI processing limits.'}
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  if (currentTimeline.status === 'FAILED') {
+                    return (
+                      <div style={{ textAlign: 'center', padding: '1.25rem', backgroundColor: '#FEF2F2', borderRadius: 'var(--radius-xs)', border: '1px solid #FECACA' }}>
+                        <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#991B1B', marginBottom: '0.35rem' }}>
+                          Timeline Generation Failed
+                        </div>
+                        <p style={{ fontSize: '0.78rem', color: '#B91C1C', marginBottom: '0.85rem' }}>
+                          {currentTimeline.error_message || 'Unexpected failure during timeline extraction.'}
+                        </p>
+                        {canManageDoc && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => handleGenerateTimeline(selectedTimelineVersion, true)}
+                          >
+                            ↻ Retry Timeline Generation
+                          </button>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  // COMPLETED
+                  const events = currentTimeline.events || [];
+                  if (events.length === 0) {
+                    return (
+                      <div>
+                        <div style={{ textAlign: 'center', padding: '1.5rem 1rem', backgroundColor: '#F8FAFC', borderRadius: 'var(--radius-xs)', border: '1px solid #E2E8F0', marginBottom: '0.75rem' }}>
+                          <span style={{ fontSize: '0.85rem', color: 'var(--ink-secondary)' }}>
+                            No dated events were explicitly identified in this revision.
+                          </span>
+                        </div>
+                        {/* Footer */}
+                        <div style={{ borderTop: '1px solid #F1F5F9', paddingTop: '0.65rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                          <div style={{ fontSize: '0.7rem', color: 'var(--ink-muted)' }}>
+                            {currentTimeline.ai_provider === 'mock' ? (
+                              <span>Provider: <strong>Mock (offline heuristics)</strong></span>
+                            ) : (
+                              <span>Provider: <strong>Google Gemini</strong> · {currentTimeline.ai_model || 'gemini-2.0-flash'}</span>
+                            )}
+                            {currentTimeline.extraction_duration_ms !== null && currentTimeline.extraction_duration_ms !== undefined && (
+                              <span> · {currentTimeline.extraction_duration_ms} ms</span>
+                            )}
+                            {currentTimeline.updated_at && (
+                              <span> · {formatDate(currentTimeline.updated_at)}</span>
+                            )}
+                          </div>
+                          {canManageDoc && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              style={{ fontSize: '0.72rem', padding: '0.2rem 0.55rem' }}
+                              onClick={() => handleGenerateTimeline(selectedTimelineVersion, true)}
+                            >
+                              ↻ Re-generate Timeline
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  // Vertical timeline
+                  const getEventTypeBadgeStyle = (type) => {
+                    switch (type) {
+                      case 'HEARING':
+                        return { backgroundColor: '#FEF3C7', color: '#92400E', border: '1px solid #FDE68A' };
+                      case 'FILING':
+                        return { backgroundColor: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE' };
+                      case 'AGREEMENT':
+                      case 'EXECUTION':
+                        return { backgroundColor: '#ECFDF5', color: '#047857', border: '1px solid #A7F3D0' };
+                      case 'ORDER':
+                        return { backgroundColor: '#F3E8FF', color: '#7E22CE', border: '1px solid #E9D5FF' };
+                      case 'NOTICE':
+                        return { backgroundColor: '#FFF7ED', color: '#C2410C', border: '1px solid #FED7AA' };
+                      case 'AMENDMENT':
+                        return { backgroundColor: '#EEF2FF', color: '#4338CA', border: '1px solid #C7D2FE' };
+                      case 'DEADLINE':
+                        return { backgroundColor: '#FEE2E2', color: '#B91C1C', border: '1px solid #FECACA' };
+                      case 'PAYMENT':
+                        return { backgroundColor: '#D1FAE5', color: '#065F46', border: '1px solid #A7F3D0' };
+                      case 'TRANSFER':
+                        return { backgroundColor: '#CCFBF1', color: '#115E59', border: '1px solid #99F6E4' };
+                      default:
+                        return { backgroundColor: '#F1F5F9', color: '#475569', border: '1px solid #CBD5E1' };
+                    }
+                  };
+
+                  return (
+                    <div>
+                      <div style={{ position: 'relative', paddingLeft: '1.5rem', marginBottom: '1.25rem' }}>
+                        {/* Continuous vertical line */}
+                        <div
+                          style={{
+                            position: 'absolute',
+                            left: '0.45rem',
+                            top: '0.75rem',
+                            bottom: '0.75rem',
+                            width: '2px',
+                            backgroundColor: '#CBD5E1',
+                          }}
+                        />
+
+                        {events.map((ev, idx) => (
+                          <div
+                            key={`event-${idx}`}
+                            style={{
+                              position: 'relative',
+                              marginBottom: idx === events.length - 1 ? '0' : '1.25rem',
+                            }}
+                          >
+                            {/* Timeline node marker */}
+                            <div
+                              style={{
+                                position: 'absolute',
+                                left: '-1.35rem',
+                                top: '0.25rem',
+                                width: '10px',
+                                height: '10px',
+                                borderRadius: '50%',
+                                backgroundColor: 'var(--accent-navy)',
+                                border: '2px solid #FFFFFF',
+                                boxShadow: '0 0 0 1px #CBD5E1',
+                              }}
+                            />
+
+                            <div
+                              style={{
+                                backgroundColor: '#F8FAFC',
+                                border: '1px solid #E2E8F0',
+                                borderRadius: 'var(--radius-xs)',
+                                padding: '0.65rem 0.85rem',
+                              }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.35rem', flexWrap: 'wrap', gap: '0.35rem' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                                  <span style={{ fontWeight: 700, fontSize: '0.82rem', color: 'var(--accent-navy)', letterSpacing: '0.02em' }}>
+                                    {ev.date_raw || ev.date}
+                                  </span>
+                                  {ev.date && ev.date !== ev.date_raw && (
+                                    <span style={{ fontSize: '0.68rem', color: 'var(--ink-muted)' }}>
+                                      ({ev.date})
+                                    </span>
+                                  )}
+                                </div>
+                                <span
+                                  className="badge"
+                                  style={{
+                                    ...getEventTypeBadgeStyle(ev.event_type),
+                                    fontWeight: 700,
+                                    fontSize: '0.68rem',
+                                    padding: '0.15rem 0.45rem',
+                                  }}
+                                >
+                                  {ev.event_type}
+                                </span>
+                              </div>
+
+                              <p style={{ fontSize: '0.78rem', color: 'var(--ink-primary)', margin: '0 0 0.35rem 0', lineHeight: 1.45 }}>
+                                {ev.description}
+                              </p>
+
+                              {ev.source_reference && (
+                                <div style={{ fontSize: '0.7rem', color: 'var(--ink-muted)', fontStyle: 'italic', borderTop: '1px dashed #E2E8F0', paddingTop: '0.3rem', marginTop: '0.3rem' }}>
+                                  Source: &ldquo;{ev.source_reference}&rdquo;
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Timeline Footer */}
+                      <div style={{ borderTop: '1px solid #F1F5F9', paddingTop: '0.65rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--ink-muted)' }}>
+                          {currentTimeline.ai_provider === 'mock' ? (
+                            <span>Provider: <strong>Mock (offline heuristics)</strong></span>
+                          ) : (
+                            <span>Provider: <strong>Google Gemini</strong> · {currentTimeline.ai_model || 'gemini-2.0-flash'}</span>
+                          )}
+                          {currentTimeline.extraction_duration_ms !== null && currentTimeline.extraction_duration_ms !== undefined && (
+                            <span> · {currentTimeline.extraction_duration_ms} ms</span>
+                          )}
+                          {currentTimeline.updated_at && (
+                            <span> · {formatDate(currentTimeline.updated_at)}</span>
+                          )}
+                        </div>
+
+                        {canManageDoc && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ fontSize: '0.72rem', padding: '0.2rem 0.55rem' }}
+                            onClick={() => handleGenerateTimeline(selectedTimelineVersion, true)}
+                            disabled={generatingTimelineVer === selectedTimelineVersion}
+                            title="Force re-generation of AI timeline"
+                          >
+                            ↻ Re-generate Timeline
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* AI Version Comparison Section (Displayed when at least 2 versions exist) */}
+              {versions.length >= 2 && (
+                <div style={{ backgroundColor: '#F8FAFC', border: '1px solid #CBD5E1', borderRadius: 'var(--radius-sm)', padding: '1.25rem', marginBottom: '1.5rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <span className="serif-heading" style={{ fontSize: '1.05rem', color: 'var(--accent-navy)' }}>
+                        AI Version Comparison
+                      </span>
+                      <span className="badge" style={{ backgroundColor: '#EEF2FF', color: '#4338CA', border: '1px solid #C7D2FE', fontWeight: 700, fontSize: '0.72rem' }}>
+                        v{fromCompareVer} → v{toCompareVer}
+                      </span>
+                    </div>
+
+                    {/* From/To Selectors & Swap Control */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: '0.72rem', color: 'var(--ink-muted)', fontWeight: 600 }}>From:</span>
+                      <select
+                        value={fromCompareVer}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value, 10);
+                          setFromCompareVer(val);
+                          const k = `${val}->${toCompareVer}`;
+                          if (!comparisonMap[k]) {
+                            loadVersionComparison(val, toCompareVer);
+                          }
+                        }}
+                        style={{ fontSize: '0.75rem', padding: '0.2rem 0.4rem', borderRadius: 'var(--radius-xs)', border: '1px solid var(--border-color)', backgroundColor: '#FFFFFF' }}
+                      >
+                        {versions.map((v) => (
+                          <option key={v.version_number} value={v.version_number}>
+                            v{v.version_number}
+                          </option>
+                        ))}
+                      </select>
+
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        style={{ fontSize: '0.8rem', padding: '0.15rem 0.4rem' }}
+                        title="Swap comparison direction"
+                        onClick={() => {
+                          const prevFrom = fromCompareVer;
+                          const prevTo = toCompareVer;
+                          setFromCompareVer(prevTo);
+                          setToCompareVer(prevFrom);
+                          const k = `${prevTo}->${prevFrom}`;
+                          if (!comparisonMap[k]) {
+                            loadVersionComparison(prevTo, prevFrom);
+                          }
+                        }}
+                      >
+                        ⇄
+                      </button>
+
+                      <span style={{ fontSize: '0.72rem', color: 'var(--ink-muted)', fontWeight: 600 }}>To:</span>
+                      <select
+                        value={toCompareVer}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value, 10);
+                          setToCompareVer(val);
+                          const k = `${fromCompareVer}->${val}`;
+                          if (!comparisonMap[k]) {
+                            loadVersionComparison(fromCompareVer, val);
+                          }
+                        }}
+                        style={{ fontSize: '0.75rem', padding: '0.2rem 0.4rem', borderRadius: 'var(--radius-xs)', border: '1px solid var(--border-color)', backgroundColor: '#FFFFFF' }}
+                      >
+                        {versions.map((v) => (
+                          <option key={v.version_number} value={v.version_number}>
+                            v{v.version_number}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Explicit Disclaimer Notice */}
+                  <div style={{ fontSize: '0.74rem', color: 'var(--ink-secondary)', backgroundColor: '#FFFFFF', border: '1px solid #E2E8F0', padding: '0.45rem 0.65rem', borderRadius: 'var(--radius-xs)', marginBottom: '0.85rem' }}>
+                    ℹ <strong>Evidentiary Notice:</strong> AI version comparison is an analytical tool identifying textual and structural shifts. It does <em>not</em> evaluate legal validity or determine party merits.
+                  </div>
+
+                  {comparisonError && (
+                    <div className="verdict-banner tampered" style={{ marginBottom: '0.85rem', padding: '0.55rem 0.75rem' }}>
+                      <div className="verdict-explanation" style={{ margin: 0, fontSize: '0.78rem' }}>
+                        {comparisonError}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Loading / Comparing State */}
+                  {runningComparisonKey === `${fromCompareVer}->${toCompareVer}` || loadingComparisonKey === `${fromCompareVer}->${toCompareVer}` ? (
+                    <div style={{ textAlign: 'center', padding: '1.75rem 1rem', backgroundColor: '#FFFFFF', borderRadius: 'var(--radius-xs)', border: '1px solid #E2E8F0' }}>
+                      <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--accent-navy)', marginBottom: '0.25rem' }}>
+                        {runningComparisonKey === `${fromCompareVer}->${toCompareVer}` ? 'Comparing Revisions with AI Engine...' : 'Retrieving Comparison for Versions...'}
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
+                        Evaluating metadata deltas, added/removed parties, modified dates, and factual/legal shifts.
+                      </div>
+                    </div>
+                  ) : (() => {
+                    const currentCompKey = `${fromCompareVer}->${toCompareVer}`;
+                    const currentComp = comparisonMap[currentCompKey];
+                    const compStatus = currentComp?.status || 'NOT_GENERATED';
+
+                    if (compStatus === 'NOT_GENERATED') {
+                      return (
+                        <div style={{ textAlign: 'center', padding: '1.5rem 1rem', backgroundColor: '#FFFFFF', borderRadius: 'var(--radius-xs)', border: '1px dashed #CBD5E1' }}>
+                          <div style={{ fontSize: '0.82rem', color: 'var(--ink-secondary)', marginBottom: '0.75rem' }}>
+                            Comparison between <strong>Version {fromCompareVer}</strong> and <strong>Version {toCompareVer}</strong> has not been generated yet.
+                          </div>
+                          {canManageDoc ? (
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              style={{ fontSize: '0.8rem' }}
+                              onClick={() => handleRunComparison(fromCompareVer, toCompareVer, false)}
+                            >
+                              ⚡ Compare Version {fromCompareVer} → Version {toCompareVer}
+                            </button>
+                          ) : (
+                            <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)', fontStyle: 'italic' }}>
+                              Version comparison must be initiated by the document depositor or vault administrator.
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }
+
+                    if (compStatus === 'FAILED') {
+                      return (
+                        <div style={{ backgroundColor: '#FEF2F2', border: '1px solid #F87171', borderRadius: 'var(--radius-xs)', padding: '0.85rem 1rem' }}>
+                          <div style={{ fontWeight: 700, fontSize: '0.82rem', color: '#991B1B', marginBottom: '0.25rem' }}>
+                            Comparison Generation Failed
+                          </div>
+                          <div style={{ fontSize: '0.75rem', color: '#7F1D1D', marginBottom: '0.65rem' }}>
+                            {currentComp.error_message || 'An unexpected error occurred while analyzing differences.'}
+                          </div>
+                          {canManageDoc && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              style={{ fontSize: '0.75rem' }}
+                              onClick={() => handleRunComparison(fromCompareVer, toCompareVer, true)}
+                            >
+                              ↻ Retry Comparison
+                            </button>
+                          )}
+                        </div>
+                      );
+                    }
+
+                    const metaChanges = currentComp.metadata_changes || { added: [], removed: [], changed: [] };
+                    const sumChanges = currentComp.summary_changes || {};
+
+                    const factsAdded = sumChanges.facts_added || [];
+                    const factsRemoved = sumChanges.facts_removed || [];
+                    const procAdded = (sumChanges.procedural_added?.length > 0 ? sumChanges.procedural_added : (sumChanges.important_points_added || []));
+                    const procRemoved = (sumChanges.procedural_removed?.length > 0 ? sumChanges.procedural_removed : (sumChanges.important_points_removed || []));
+                    const legalAdded = sumChanges.legal_issues_added || [];
+                    const legalRemoved = sumChanges.legal_issues_removed || [];
+
+                    // Party changes
+                    const partyAdded = (metaChanges.added || []).filter(item => item.field === 'party');
+                    const partyRemoved = (metaChanges.removed || []).filter(item => item.field === 'party');
+                    const partyChanged = (metaChanges.changed || []).filter(item => item.field === 'party_role');
+
+                    // Date / Event changes
+                    const dateAdded = (metaChanges.added || []).filter(item => item.field === 'date');
+                    const dateRemoved = (metaChanges.removed || []).filter(item => item.field === 'date');
+                    const dateChanged = (metaChanges.changed || []).filter(item => item.field === 'date' || item.field === 'date_role');
+
+                    // Technical / Scalar Metadata & Keywords (Optional / Collapsed)
+                    const keywordAdded = (metaChanges.added || []).filter(item => item.field === 'keyword');
+                    const keywordRemoved = (metaChanges.removed || []).filter(item => item.field === 'keyword');
+                    const scalarChanged = (metaChanges.changed || []).filter(item => item.field !== 'date' && item.field !== 'date_role' && item.field !== 'party_role');
+                    const scalarAdded = (metaChanges.added || []).filter(item => item.field !== 'party' && item.field !== 'date' && item.field !== 'keyword');
+                    const scalarRemoved = (metaChanges.removed || []).filter(item => item.field !== 'party' && item.field !== 'date' && item.field !== 'keyword');
+                    const totalTechDeltas = keywordAdded.length + keywordRemoved.length + scalarChanged.length + scalarAdded.length + scalarRemoved.length;
+                    const newInLabel = `NEW IN V${toCompareVer}`;
+                    const presentOnlyLabel = `PRESENT IN V${fromCompareVer} ONLY`;
+
+                    return (
+                      <div style={{ backgroundColor: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: 'var(--radius-xs)', padding: '1rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                        {/* Explicit Direction Header & Explanatory Banner */}
+                        <div style={{ backgroundColor: '#F8FAFC', border: '1px solid #CBD5E1', borderRadius: 'var(--radius-xs)', padding: '0.75rem 1rem' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.35rem' }}>
+                            <div style={{ fontSize: '0.84rem', fontWeight: 800, color: 'var(--ink-primary)' }}>
+                              Comparing Version {fromCompareVer} → Version {toCompareVer}
+                            </div>
+                            <span style={{ fontSize: '0.68rem', fontWeight: 700, color: '#475569', backgroundColor: '#E2E8F0', padding: '0.15rem 0.5rem', borderRadius: '10px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                              Directional Revision Analysis
+                            </span>
+                          </div>
+                          <div style={{ fontSize: '0.73rem', color: 'var(--ink-secondary)', lineHeight: 1.5 }}>
+                            Comparison is directional. <strong>'New in V{toCompareVer}'</strong> means the information appears in V{toCompareVer} but not V{fromCompareVer}. <strong>'Present in V{fromCompareVer} only'</strong> means it appears in V{fromCompareVer} but not V{toCompareVer}. Modified values show how the same field or event changed between revisions.
+                          </div>
+                        </div>
+
+                        {/* 1. SUMMARY OF MATERIAL CHANGES */}
+                        <div style={{ backgroundColor: '#F8FAFC', borderLeft: '4px solid #4338CA', padding: '0.85rem 1rem', borderRadius: '0 var(--radius-xs) var(--radius-xs) 0' }}>
+                          <div style={{ fontSize: '0.74rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#4338CA', marginBottom: '0.35rem' }}>
+                            1. Summary of Material Changes (v{fromCompareVer} → v{toCompareVer})
+                          </div>
+                          <div style={{ fontSize: '0.82rem', color: 'var(--ink-primary)', lineHeight: 1.6 }}>
+                            {currentComp.material_changes || 'No material differences detected between the selected versions.'}
+                          </div>
+                        </div>
+
+                        {/* 2. FACTUAL / EVIDENTIARY DEVELOPMENTS (High Emphasis) */}
+                        {(factsAdded.length > 0 || factsRemoved.length > 0) && (
+                          <div style={{ border: '1px solid #CBD5E1', borderRadius: 'var(--radius-xs)', padding: '0.85rem 1rem' }}>
+                            <div style={{ fontSize: '0.76rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--ink-primary)', marginBottom: '0.2rem' }}>
+                              2. Factual / Evidentiary Developments
+                            </div>
+                            <div style={{ fontSize: '0.72rem', color: 'var(--ink-muted)', marginBottom: '0.65rem' }}>
+                              Concrete factual assertions, observations, and evidence-related statements
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
+                              {factsAdded.map((f, idx) => (
+                                <div key={`fa-${idx}`} style={{ backgroundColor: '#ECFDF5', border: '1px solid #A7F3D0', padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-xs)', fontSize: '0.78rem', color: '#047857', display: 'flex', flexDirection: 'column', gap: '0.2rem', lineHeight: 1.5 }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                                    <span style={{ fontWeight: 800, fontSize: '0.7rem', color: '#047857' }}>🟢 {newInLabel}</span>
+                                  </div>
+                                  <div style={{ color: '#065F46', fontSize: '0.78rem' }}>{f}</div>
+                                </div>
+                              ))}
+                              {factsRemoved.map((f, idx) => (
+                                <div key={`fr-${idx}`} style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-xs)', fontSize: '0.78rem', color: '#B91C1C', display: 'flex', flexDirection: 'column', gap: '0.2rem', lineHeight: 1.5 }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                                    <span style={{ fontWeight: 800, fontSize: '0.7rem', color: '#B91C1C' }}>🔴 {presentOnlyLabel}</span>
+                                  </div>
+                                  <div style={{ color: '#991B1B', fontSize: '0.78rem' }}>{f}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 3. PROCEDURAL DEVELOPMENTS (High Emphasis) */}
+                        {(procAdded.length > 0 || procRemoved.length > 0) && (
+                          <div style={{ border: '1px solid #CBD5E1', borderRadius: 'var(--radius-xs)', padding: '0.85rem 1rem' }}>
+                            <div style={{ fontSize: '0.76rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--ink-primary)', marginBottom: '0.2rem' }}>
+                              3. Procedural Developments
+                            </div>
+                            <div style={{ fontSize: '0.72rem', color: 'var(--ink-muted)', marginBottom: '0.65rem' }}>
+                              Investigative progress, witness questioning, court hearings, filings, and procedural actions
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
+                              {procAdded.map((p, idx) => (
+                                <div key={`pa-${idx}`} style={{ backgroundColor: '#F0FDF4', border: '1px solid #BBF7D0', padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-xs)', fontSize: '0.78rem', color: '#15803D', display: 'flex', flexDirection: 'column', gap: '0.2rem', lineHeight: 1.5 }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                                    <span style={{ fontWeight: 800, fontSize: '0.7rem', color: '#15803D' }}>🟢 {newInLabel}</span>
+                                  </div>
+                                  <div style={{ color: '#166534', fontSize: '0.78rem' }}>{p}</div>
+                                </div>
+                              ))}
+                              {procRemoved.map((p, idx) => (
+                                <div key={`pr-${idx}`} style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-xs)', fontSize: '0.78rem', color: '#B91C1C', display: 'flex', flexDirection: 'column', gap: '0.2rem', lineHeight: 1.5 }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                                    <span style={{ fontWeight: 800, fontSize: '0.7rem', color: '#B91C1C' }}>🔴 {presentOnlyLabel}</span>
+                                  </div>
+                                  <div style={{ color: '#991B1B', fontSize: '0.78rem' }}>{p}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 4. PARTY / ENTITY CHANGES */}
+                        {(partyAdded.length > 0 || partyRemoved.length > 0 || partyChanged.length > 0) && (
+                          <div style={{ border: '1px solid #E2E8F0', borderRadius: 'var(--radius-xs)', padding: '0.85rem 1rem' }}>
+                            <div style={{ fontSize: '0.74rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--ink-secondary)', marginBottom: '0.2rem' }}>
+                              4. Party / Entity Changes
+                            </div>
+                            <div style={{ fontSize: '0.72rem', color: 'var(--ink-muted)', marginBottom: '0.65rem' }}>
+                              Litigants, witnesses, authorities, and role designations
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                              {partyChanged.map((item, idx) => (
+                                <div key={`pc-${idx}`} style={{ backgroundColor: '#EFF6FF', border: '1px solid #BFDBFE', padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-xs)' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.25rem' }}>
+                                    <span style={{ fontWeight: 700, color: '#1D4ED8', fontSize: '0.72rem' }}>↔ MODIFIED PARTY ROLE:</span>
+                                    <span style={{ fontWeight: 700, color: '#1E40AF', fontSize: '0.8rem' }}>{item.field_name || 'Party'}</span>
+                                  </div>
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '0.2rem 0.6rem', fontSize: '0.76rem', paddingLeft: '0.5rem', borderLeft: '2.5px solid #93C5FD' }}>
+                                    <span style={{ color: 'var(--ink-muted)', fontWeight: 600 }}>v{fromCompareVer}:</span>
+                                    <span style={{ color: 'var(--ink-primary)' }}>{item.from || 'Not Specified'}</span>
+                                    <span style={{ color: 'var(--ink-muted)', fontWeight: 600 }}>v{toCompareVer}:</span>
+                                    <span style={{ color: '#1E40AF', fontWeight: 700 }}>{item.to || 'Not Specified'}</span>
+                                  </div>
+                                </div>
+                              ))}
+                              {partyAdded.map((item, idx) => (
+                                <div key={`pa-${idx}`} style={{ backgroundColor: '#ECFDF5', border: '1px solid #A7F3D0', padding: '0.45rem 0.75rem', borderRadius: 'var(--radius-xs)', fontSize: '0.76rem', color: '#047857' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                    <span style={{ fontWeight: 800, fontSize: '0.7rem' }}>🟢 {newInLabel}:</span>
+                                    <span style={{ fontWeight: 700, color: '#065F46' }}>{item.value || item.description}</span>
+                                  </div>
+                                </div>
+                              ))}
+                              {partyRemoved.map((item, idx) => (
+                                <div key={`pr-${idx}`} style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', padding: '0.45rem 0.75rem', borderRadius: 'var(--radius-xs)', fontSize: '0.76rem', color: '#B91C1C' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                    <span style={{ fontWeight: 800, fontSize: '0.7rem' }}>🔴 {presentOnlyLabel}:</span>
+                                    <span style={{ fontWeight: 700, color: '#991B1B' }}>{item.value || item.description}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 5. DATE / EVENT CHANGES */}
+                        {(dateAdded.length > 0 || dateRemoved.length > 0 || dateChanged.length > 0) && (
+                          <div style={{ border: '1px solid #E2E8F0', borderRadius: 'var(--radius-xs)', padding: '0.85rem 1rem' }}>
+                            <div style={{ fontSize: '0.74rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--ink-secondary)', marginBottom: '0.2rem' }}>
+                              5. Date / Event Changes
+                            </div>
+                            <div style={{ fontSize: '0.72rem', color: 'var(--ink-muted)', marginBottom: '0.65rem' }}>
+                              Hearing dates, filing deadlines, agreements, and chronological milestones
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                              {dateChanged.map((item, idx) => {
+                                const dateLabel = item.field_name || 'Event Date';
+                                return (
+                                  <div key={`dc-${idx}`} style={{ backgroundColor: '#EFF6FF', border: '1px solid #BFDBFE', padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-xs)' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.25rem' }}>
+                                      <span style={{ fontWeight: 700, color: '#1D4ED8', fontSize: '0.72rem' }}>↔ MODIFIED EVENT DATE:</span>
+                                      <span style={{ fontWeight: 700, color: '#1E40AF', fontSize: '0.8rem' }}>{dateLabel}</span>
+                                    </div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '0.2rem 0.6rem', fontSize: '0.76rem', paddingLeft: '0.5rem', borderLeft: '2.5px solid #93C5FD' }}>
+                                      <span style={{ color: 'var(--ink-muted)', fontWeight: 600 }}>v{fromCompareVer}:</span>
+                                      <span style={{ color: 'var(--ink-primary)' }}>{item.from || 'Not Specified'}</span>
+                                      <span style={{ color: 'var(--ink-muted)', fontWeight: 600 }}>v{toCompareVer}:</span>
+                                      <span style={{ color: '#1E40AF', fontWeight: 700 }}>{item.to || 'Not Specified'}</span>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                              {dateAdded.map((item, idx) => (
+                                <div key={`da-${idx}`} style={{ backgroundColor: '#ECFDF5', border: '1px solid #A7F3D0', padding: '0.45rem 0.75rem', borderRadius: 'var(--radius-xs)', fontSize: '0.76rem', color: '#047857' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                    <span style={{ fontWeight: 800, fontSize: '0.7rem' }}>🟢 {newInLabel}:</span>
+                                    <span style={{ fontWeight: 700, color: '#065F46' }}>{item.value || item.description}</span>
+                                  </div>
+                                </div>
+                              ))}
+                              {dateRemoved.map((item, idx) => (
+                                <div key={`dr-${idx}`} style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', padding: '0.45rem 0.75rem', borderRadius: 'var(--radius-xs)', fontSize: '0.76rem', color: '#B91C1C' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                    <span style={{ fontWeight: 800, fontSize: '0.7rem' }}>🔴 {presentOnlyLabel}:</span>
+                                    <span style={{ fontWeight: 700, color: '#991B1B' }}>{item.value || item.description}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 6. LEGAL CLAIMS & GROUNDS */}
+                        <div style={{ border: '1px solid #E2E8F0', borderRadius: 'var(--radius-xs)', padding: '0.85rem 1rem' }}>
+                          <div style={{ fontSize: '0.74rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--ink-secondary)', marginBottom: '0.2rem' }}>
+                            6. Legal Claims & Grounds
+                          </div>
+                          <div style={{ fontSize: '0.72rem', color: 'var(--ink-muted)', marginBottom: '0.65rem' }}>
+                            Explicit statutory claims, disputed legal issues, and requested remedies
+                          </div>
+                          {legalAdded.length > 0 || legalRemoved.length > 0 ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                              {legalAdded.map((l, idx) => (
+                                <div key={`la-${idx}`} style={{ backgroundColor: '#FAF5FF', border: '1px solid #E9D5FF', padding: '0.45rem 0.75rem', borderRadius: 'var(--radius-xs)', fontSize: '0.76rem', color: '#7E22CE', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                                    <span style={{ fontWeight: 800, fontSize: '0.7rem', color: '#7E22CE' }}>🟢 {newInLabel}</span>
+                                  </div>
+                                  <div style={{ color: '#6B21A8', fontSize: '0.76rem' }}>{l}</div>
+                                </div>
+                              ))}
+                              {legalRemoved.map((l, idx) => (
+                                <div key={`lr-${idx}`} style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', padding: '0.45rem 0.75rem', borderRadius: 'var(--radius-xs)', fontSize: '0.76rem', color: '#B91C1C', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                                    <span style={{ fontWeight: 800, fontSize: '0.7rem', color: '#B91C1C' }}>🔴 {presentOnlyLabel}</span>
+                                  </div>
+                                  <div style={{ color: '#991B1B', fontSize: '0.76rem' }}>{l}</div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)', fontStyle: 'italic', backgroundColor: '#F8FAFC', padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-xs)' }}>
+                              No explicit legal claims or grounds were identified in either revision.
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 7. TECHNICAL METADATA (Optional / Collapsed) */}
+                        <details style={{ border: '1px solid #E2E8F0', borderRadius: 'var(--radius-xs)', padding: '0.65rem 0.85rem', backgroundColor: '#F8FAFC' }}>
+                          <summary style={{ fontSize: '0.74rem', fontWeight: 600, color: 'var(--ink-secondary)', cursor: 'pointer', userSelect: 'none' }}>
+                            7. Technical Metadata & Indexing Changes {totalTechDeltas > 0 ? `(${totalTechDeltas} items)` : '(None)'}
+                          </summary>
+                          <div style={{ marginTop: '0.65rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                            {scalarChanged.map((item, idx) => {
+                              const fieldLabel = item.field_name || (item.field ? item.field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : 'Field');
+                              return (
+                                <div key={`sc-${idx}`} style={{ backgroundColor: '#EFF6FF', border: '1px solid #BFDBFE', padding: '0.45rem 0.7rem', borderRadius: 'var(--radius-xs)' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.2rem' }}>
+                                    <span style={{ fontWeight: 700, color: '#1D4ED8', fontSize: '0.7rem' }}>↔ MODIFIED:</span>
+                                    <span style={{ fontWeight: 700, color: '#1E40AF', fontSize: '0.76rem' }}>{fieldLabel}</span>
+                                  </div>
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '0.15rem 0.5rem', fontSize: '0.72rem', paddingLeft: '0.5rem', borderLeft: '2px solid #93C5FD' }}>
+                                    <span style={{ color: 'var(--ink-muted)', fontWeight: 600 }}>v{fromCompareVer}:</span>
+                                    <span style={{ color: 'var(--ink-primary)' }}>{item.from || 'Not Specified'}</span>
+                                    <span style={{ color: 'var(--ink-muted)', fontWeight: 600 }}>v{toCompareVer}:</span>
+                                    <span style={{ color: '#1E40AF', fontWeight: 700 }}>{item.to || 'Not Specified'}</span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                            {scalarAdded.map((item, idx) => {
+                              const fieldLabel = item.field_name || (item.field ? item.field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : 'Field');
+                              return (
+                                <div key={`sa-${idx}`} style={{ backgroundColor: '#ECFDF5', border: '1px solid #A7F3D0', padding: '0.4rem 0.65rem', borderRadius: 'var(--radius-xs)', fontSize: '0.74rem', color: '#047857' }}>
+                                  <span style={{ fontWeight: 700 }}>+ ADDED: </span>{fieldLabel}: {item.value || item.description}
+                                </div>
+                              );
+                            })}
+                            {scalarRemoved.map((item, idx) => {
+                              const fieldLabel = item.field_name || (item.field ? item.field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : 'Field');
+                              return (
+                                <div key={`sr-${idx}`} style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', padding: '0.4rem 0.65rem', borderRadius: 'var(--radius-xs)', fontSize: '0.74rem', color: '#B91C1C' }}>
+                                  <span style={{ fontWeight: 700 }}>− REMOVED: </span>{fieldLabel}: {item.value || item.description}
+                                </div>
+                              );
+                            })}
+                            {keywordAdded.length > 0 && (
+                              <div style={{ fontSize: '0.73rem', color: '#047857' }}>
+                                <strong>Added Keywords:</strong> {keywordAdded.map(k => k.value).join(', ')}
+                              </div>
+                            )}
+                            {keywordRemoved.length > 0 && (
+                              <div style={{ fontSize: '0.73rem', color: '#B91C1C' }}>
+                                <strong>Removed Keywords:</strong> {keywordRemoved.map(k => k.value).join(', ')}
+                              </div>
+                            )}
+                            {totalTechDeltas === 0 && (
+                              <div style={{ fontSize: '0.72rem', color: 'var(--ink-muted)', fontStyle: 'italic' }}>
+                                No technical metadata or indexing keyword changes between revisions.
+                              </div>
+                            )}
+                          </div>
+                        </details>
+
+                        {/* Comparison Footer */}
+                        <div style={{ borderTop: '1px solid #F1F5F9', paddingTop: '0.65rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                          <div style={{ fontSize: '0.7rem', color: 'var(--ink-muted)' }}>
+                            {currentComp.ai_provider === 'mock' || currentComp.ai_provider === 'deterministic' ? (
+                              <span>Provider: <strong>Mock (offline heuristics)</strong></span>
+                            ) : (
+                              <span>Provider: <strong>Google Gemini</strong> · {currentComp.ai_model || 'gemini-2.0-flash'}</span>
+                            )}
+                            {currentComp.comparison_duration_ms !== null && currentComp.comparison_duration_ms !== undefined && (
+                              <span> · {currentComp.comparison_duration_ms} ms</span>
+                            )}
+                            {currentComp.updated_at && (
+                              <span> · {formatDate(currentComp.updated_at)}</span>
+                            )}
+                          </div>
+
+                          {canManageDoc && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              style={{ fontSize: '0.72rem', padding: '0.2rem 0.55rem' }}
+                              onClick={() => handleRunComparison(fromCompareVer, toCompareVer, true)}
+                              disabled={runningComparisonKey === currentCompKey}
+                              title="Force re-generation of AI comparison between these revisions"
+                            >
+                              ↻ Re-run Comparison
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
               {/* Revision Upload Form Modal Overlay */}
               {isUploadRevisionOpen && (
                 <div
@@ -1359,8 +2285,8 @@ export default function DocumentDetailDrawer({ documentId, isOpen, onClose, onVe
                                   </span>
                                 )
                               ) : (
-                                <span style={{ fontSize: '0.72rem', color: 'var(--ink-muted)', fontStyle: 'italic' }}>
-                                  Unverified
+                                <span className="badge" style={{ backgroundColor: '#F1F5F9', color: '#64748B', border: '1px solid #CBD5E1', fontWeight: 600, fontSize: '0.68rem', padding: '0.05rem 0.4rem' }}>
+                                  ⚠ NOT VERIFIED
                                 </span>
                               )}
                             </div>

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, UniqueConstraint, Float
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 
@@ -76,6 +76,7 @@ class DocumentVersion(Base):
     document = relationship("Document", back_populates="versions")
     ai_metadata = relationship("DocumentVersionMetadata", back_populates="version", uselist=False, cascade="all, delete-orphan")
     ai_summary = relationship("DocumentVersionSummary", back_populates="version", uselist=False, cascade="all, delete-orphan")
+    ai_timeline = relationship("DocumentVersionTimeline", back_populates="version", uselist=False, cascade="all, delete-orphan")
 
 
 class DocumentVersionMetadata(Base):
@@ -144,6 +145,87 @@ class DocumentVersionSummary(Base):
 
     version = relationship("DocumentVersion", back_populates="ai_summary")
     document = relationship("Document")
+
+
+class DocumentVersionComparison(Base):
+    __tablename__ = "document_version_comparisons"
+
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    from_version_id = Column(Integer, ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True)
+    to_version_id = Column(Integer, ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True)
+    from_version_number = Column(Integer, nullable=False)
+    to_version_number = Column(Integer, nullable=False)
+    from_source_hash = Column(String, nullable=False, index=True)
+    to_source_hash = Column(String, nullable=False, index=True)
+
+    status = Column(String, nullable=False, default="NOT_GENERATED")  # NOT_GENERATED, COMPLETED, FAILED, METADATA_UNAVAILABLE
+    material_changes = Column(Text, nullable=True)
+    metadata_diff_json = Column(Text, nullable=True)
+    summary_diff_json = Column(Text, nullable=True)
+
+    ai_provider = Column(String, nullable=True)
+    ai_model = Column(String, nullable=True)
+    comparison_duration_ms = Column(Integer, nullable=True)
+    error_message = Column(String, nullable=True)
+
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "from_version_id", "to_version_id", name="uq_document_version_comparison"),
+    )
+
+    document = relationship("Document")
+    from_version = relationship("DocumentVersion", foreign_keys=[from_version_id])
+    to_version = relationship("DocumentVersion", foreign_keys=[to_version_id])
+
+
+class DocumentVersionTimeline(Base):
+    __tablename__ = "document_version_timelines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_id = Column(Integer, ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    version_number = Column(Integer, nullable=False)
+    source_hash = Column(String, nullable=False, index=True)
+
+    status = Column(String, nullable=False, default="NOT_GENERATED")  # NOT_GENERATED, COMPLETED, FAILED, EXTRACTION_UNAVAILABLE, EXTRACTION_LIMIT_EXCEEDED
+    ai_provider = Column(String, nullable=True)
+    ai_model = Column(String, nullable=True)
+    generation_duration_ms = Column(Integer, nullable=True)
+    error_message = Column(String, nullable=True)
+
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("version_id", name="uq_version_timeline"),
+    )
+
+    version = relationship("DocumentVersion", back_populates="ai_timeline")
+    document = relationship("Document")
+    events = relationship("DocumentVersionTimelineEvent", back_populates="timeline", cascade="all, delete-orphan", order_by="DocumentVersionTimelineEvent.sequence_order")
+
+
+class DocumentVersionTimelineEvent(Base):
+    __tablename__ = "document_version_timeline_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    timeline_id = Column(Integer, ForeignKey("document_version_timelines.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    event_date = Column(String, nullable=True, index=True)      # e.g. "2025-07-03" or None
+    event_date_raw = Column(String, nullable=False)             # e.g. "3 July 2025"
+    event_type = Column(String, nullable=False, index=True)     # FILING, AGREEMENT, HEARING, etc.
+    event_description = Column(Text, nullable=False)
+    source_reference = Column(Text, nullable=True)             # short bounded excerpt
+    confidence = Column(Float, nullable=True, default=0.90)
+    sequence_order = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
+
+    timeline = relationship("DocumentVersionTimeline", back_populates="events")
 
 
 class DocumentShare(Base):

@@ -100,18 +100,69 @@ def run_tests():
     assert "not found on disk" in resp_d.json()["detail"]
     print(">>> TEST CASE D PASSED (404 Missing file on disk)!")
 
+    # --- TEST CASE E: MULTI-VERSION INDEPENDENT VERIFICATION & MIXED STATE ---
+    print("\n[TEST CASE E] Multi-Version Independent Verification & Mixed State...")
+    # 1. Upload V1
+    pdf_v1 = f"%PDF-1.4 1 0 obj << /Type /V1Test >> endobj trailer << /Size {salt}V1 >> %%EOF".encode()
+    upload_v1 = requests.post(
+        f"{BASE_URL}/documents/upload",
+        files={"file": ("multiver_test_v1.pdf", pdf_v1, "application/pdf")},
+        data={"case_number": f"CASE-MV-{salt}", "uploaded_by": "Tester"},
+        headers=headers,
+    )
+    assert upload_v1.status_code == 200
+    mv_doc_id = upload_v1.json()["document_id"]
+
+    # 2. Upload V2
+    pdf_v2 = f"%PDF-1.4 2 0 obj << /Type /V2Test >> endobj trailer << /Size {salt}V2 >> %%EOF".encode()
+    upload_v2 = requests.post(
+        f"{BASE_URL}/documents/{mv_doc_id}/versions",
+        files={"file": ("multiver_test_v2.pdf", pdf_v2, "application/pdf")},
+        headers=headers,
+    )
+    assert upload_v2.status_code == 200
+
+    # 3. Verify V1 and V2 independently
+    v1_ver = requests.post(f"{BASE_URL}/documents/{mv_doc_id}/versions/1/verify", headers=headers).json()
+    assert v1_ver["verified"] is True
+    assert v1_ver["result"] == "VERIFIED"
+    assert v1_ver["version_number"] == 1
+
+    v2_ver = requests.post(f"{BASE_URL}/documents/{mv_doc_id}/versions/2/verify", headers=headers).json()
+    assert v2_ver["verified"] is True
+    assert v2_ver["result"] == "VERIFIED"
+    assert v2_ver["version_number"] == 2
+    print("    [OK] V1 and V2 independently verified as VERIFIED.")
+
+    # 4. Tamper only with V2 file on disk
+    v2_stored = upload_v2.json().get("stored_filename") or f"doc_{mv_doc_id}_v2_multiver_test_v2.pdf"
+    v2_disk_file = os.path.join(os.path.dirname(__file__), "uploads", v2_stored)
+    with open(v2_disk_file, "wb") as f:
+        f.write(b"%PDF-1.4 TAMPERED V2 CONTENT %%EOF")
+
+    # 5. Check mixed state: V1 remains VERIFIED, V2 is TAMPERED
+    v1_check = requests.post(f"{BASE_URL}/documents/{mv_doc_id}/versions/1/verify", headers=headers).json()
+    assert v1_check["verified"] is True
+    assert v1_check["result"] == "VERIFIED"
+
+    v2_check = requests.post(f"{BASE_URL}/documents/{mv_doc_id}/versions/2/verify", headers=headers).json()
+    assert v2_check["verified"] is False
+    assert v2_check["result"] == "TAMPERED"
+    print("    [OK] Mixed state verified: V1 remains VERIFIED while V2 is TAMPERED without cross-contamination.")
+
     # Clean up temporary test rows from SQLite and disk so test is idempotent
     try:
         db_path = os.path.join(os.path.dirname(__file__), "legalvault.db")
         conn = sqlite3.connect(db_path)
-        conn.execute("DELETE FROM document_version_metadata WHERE document_id IN (?, ?)", (doc_a_id, tamper_doc_id))
-        conn.execute("DELETE FROM document_versions WHERE document_id IN (?, ?)", (doc_a_id, tamper_doc_id))
-        conn.execute("DELETE FROM documents WHERE id IN (?, ?)", (doc_a_id, tamper_doc_id))
+        conn.execute("DELETE FROM document_version_metadata WHERE document_id IN (?, ?, ?)", (doc_a_id, tamper_doc_id, mv_doc_id))
+        conn.execute("DELETE FROM document_versions WHERE document_id IN (?, ?, ?)", (doc_a_id, tamper_doc_id, mv_doc_id))
+        conn.execute("DELETE FROM documents WHERE id IN (?, ?, ?)", (doc_a_id, tamper_doc_id, mv_doc_id))
         conn.commit()
         conn.close()
-        orig_file = os.path.join(os.path.dirname(__file__), "uploads", "original_verification_doc.pdf")
-        if os.path.exists(orig_file):
-            os.remove(orig_file)
+        for f_name in ["original_verification_doc.pdf", "multiver_test_v1.pdf", "multiver_test_v2.pdf", v2_stored]:
+            f_path = os.path.join(os.path.dirname(__file__), "uploads", f_name)
+            if os.path.exists(f_path):
+                os.remove(f_path)
     except Exception as e:
         print("Note: cleanup exception:", e)
 

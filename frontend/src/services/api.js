@@ -535,4 +535,96 @@ export async function fetchDocumentSummary(documentId) {
   return await res.json();
 }
 
+// --- AI Version Comparison API Endpoints ---
+
+export async function compareDocumentVersions(documentId, fromVersion, toVersion, force = false) {
+  const query = `?from_version=${fromVersion}&to_version=${toVersion}${force ? '&force=true' : ''}`;
+  const res = await fetch(`${API_BASE}/documents/${documentId}/compare${query}`, {
+    method: 'POST',
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const errorMsg = typeof err.detail === 'string' ? err.detail : err.detail?.message || `AI version comparison failed with status ${res.status}`;
+    const errorObj = new Error(errorMsg);
+    errorObj.status = res.status;
+    errorObj.data = err.detail || err;
+    throw errorObj;
+  }
+
+  return await res.json();
+}
+
+export async function fetchDocumentVersionComparison(documentId, fromVersion, toVersion) {
+  const query = `?from_version=${fromVersion}&to_version=${toVersion}`;
+  const res = await fetch(`${API_BASE}/documents/${documentId}/compare${query}`, {
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to fetch comparison for Versions ${fromVersion} -> ${toVersion}`);
+  }
+
+  return await res.json();
+}
+
+// --- AI Evidence Timeline API Endpoints ---
+
+export async function generateVersionTimeline(documentId, versionIdentifier, force = false) {
+  const query = force ? '?force=true' : '';
+  const res = await fetch(`${API_BASE}/documents/${documentId}/versions/${versionIdentifier}/timeline${query}`, {
+    method: 'POST',
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const errorMsg = typeof err.detail === 'string' ? err.detail : err.detail?.message || `AI timeline extraction failed with status ${res.status}`;
+    const errorObj = new Error(errorMsg);
+    errorObj.status = res.status;
+    errorObj.data = err.detail || err;
+    throw errorObj;
+  }
+
+  return await res.json();
+}
+
+export async function fetchVersionTimeline(documentId, versionIdentifier) {
+  const res = await fetch(`${API_BASE}/documents/${documentId}/versions/${versionIdentifier}/timeline`, {
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to fetch timeline for Version ${versionIdentifier}`);
+  }
+
+  return await res.json();
+}
+
+export async function fetchDocumentTimeline(documentId) {
+  const res = await fetch(`${API_BASE}/documents/${documentId}/timeline`, {
+    headers: {
+      ...getAuthHeader(),
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to fetch timeline for document #${documentId}`);
+  }
+
+  return await res.json();
+}
+
 

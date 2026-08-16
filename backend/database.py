@@ -37,7 +37,7 @@ def migrate_schema() -> None:
                 if column_name not in existing_columns:
                     connection.execute(text(statement))
 
-    # Ensure document_version_metadata and document_version_summaries tables exist
+    # Ensure document_version_metadata, document_version_summaries, document_version_comparisons, and timeline tables exist
     if "document_version_metadata" not in table_names:
         from models import DocumentVersionMetadata
         DocumentVersionMetadata.__table__.create(bind=engine, checkfirst=True)
@@ -45,6 +45,18 @@ def migrate_schema() -> None:
     if "document_version_summaries" not in table_names:
         from models import DocumentVersionSummary
         DocumentVersionSummary.__table__.create(bind=engine, checkfirst=True)
+
+    if "document_version_comparisons" not in table_names:
+        from models import DocumentVersionComparison
+        DocumentVersionComparison.__table__.create(bind=engine, checkfirst=True)
+
+    if "document_version_timelines" not in table_names:
+        from models import DocumentVersionTimeline
+        DocumentVersionTimeline.__table__.create(bind=engine, checkfirst=True)
+
+    if "document_version_timeline_events" not in table_names:
+        from models import DocumentVersionTimelineEvent
+        DocumentVersionTimelineEvent.__table__.create(bind=engine, checkfirst=True)
 
     # Backfill legacy documents into document_versions purely off-chain (no blockchain calls)
     if "document_versions" in inspector.get_table_names() and "documents" in inspector.get_table_names():

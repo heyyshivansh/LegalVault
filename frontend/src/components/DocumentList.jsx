@@ -217,10 +217,10 @@ export default function DocumentList({
                             </span>
                             <span style={{ fontSize: '0.68rem', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}>
                               {integrity.verifiedVersions.length >= (doc.version || 1) && (doc.version || 1) > 1
-                                ? 'All versions'
+                                ? `All ${integrity.verifiedVersions.length} versions`
                                 : (doc.version || 1) === 1
                                 ? 'v1'
-                                : integrity.affectedLabel}
+                                : `${integrity.affectedLabel} (v${doc.version || 1} unverified)`}
                             </span>
                           </div>
                         ) : integrity.status === 'BLOCKCHAIN_PROOF_UNAVAILABLE' ? (

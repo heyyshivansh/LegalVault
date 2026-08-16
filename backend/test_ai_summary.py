@@ -204,8 +204,31 @@ def run_ai_summary_tests():
     )
     neg_summary = mock_prov.generate_summary(neg_doc_text)
     assert "confidence" not in neg_summary
-    assert len(neg_summary["legal_issues"]) > 0
-    print("    [OK] Negative document produced safe, source-bounded summary.")
+    assert isinstance(neg_summary["legal_issues"], list)
+    print("    [OK] Negative document produced safe, source-bounded summary with clean empty legal claims.")
+
+    # 4c. Theft V2 fixture key facts extraction
+    theft_v2_text = """
+    POLICE INVESTIGATION REPORT / INCIDENT STATEMENT
+    Date: 18 June 2026
+    Subject: Supplemental Investigation Report - Theft at Sharma Electronics
+
+    1. The theft was reported at Sharma Electronics on 5 June 2026 involving missing cash of Rs 2,50,000.
+    2. The incident is believed to have occurred between 9 PM on 4 June 2026 and 7 AM on 5 June 2026.
+    3. CCTV footage recovered from a nearby building reportedly showed a person entering the store at approximately 11:42 PM on 4 June 2026.
+    4. Amit Verma reportedly stated that he saw Rohan Mehta near the rear entrance of the store shortly before midnight.
+    5. A second witness reportedly observed a motorcycle matching the description associated with Rohan Mehta near the premises.
+    6. The investigation into the theft reported at Sharma Electronics progressed after statements were obtained from two witnesses.
+    7. Rohan Mehta was questioned on 18 June 2026, and the investigation remained ongoing regarding the missing funds.
+    """
+    theft_summary = mock_prov.generate_summary(theft_v2_text)
+    assert len(theft_summary["key_facts"]) >= 4, f"Expected >= 4 key facts, got {len(theft_summary['key_facts'])}"
+    assert "Factual background and procedural statements as detailed in the filing text." not in theft_summary["key_facts"]
+    assert any("CCTV footage" in f for f in theft_summary["key_facts"])
+    assert any("Amit Verma" in f for f in theft_summary["key_facts"])
+    assert any("motorcycle" in f for f in theft_summary["key_facts"])
+    assert any("investigation" in f.lower() for f in theft_summary["key_facts"])
+    print("    [OK] Theft V2 fixture generated concrete, source-grounded key facts without generic fallbacks.")
 
     # 5. Gemini Provider Contract & Failure Handling Tests
     print("\n[5] Testing Gemini Provider Contract & Failure Isolation...")

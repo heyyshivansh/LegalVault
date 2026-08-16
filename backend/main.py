@@ -13,7 +13,19 @@ load_dotenv()
 from sqlalchemy import func
 
 from database import engine, Base, SessionLocal, migrate_schema, seed_initial_users
-from models import Document, User, UserRole, DocumentShare, DocumentVersion, AuditLog, DocumentVersionMetadata, DocumentVersionSummary
+from models import (
+    Document,
+    User,
+    UserRole,
+    DocumentShare,
+    DocumentVersion,
+    AuditLog,
+    DocumentVersionMetadata,
+    DocumentVersionSummary,
+    DocumentVersionComparison,
+    DocumentVersionTimeline,
+    DocumentVersionTimelineEvent,
+)
 from sqlalchemy.exc import IntegrityError
 from blockchain import (
     register_document_on_chain,
@@ -45,8 +57,14 @@ from ai_extractor import (
     AIServiceError,
     DEFAULT_EMPTY_METADATA,
     DEFAULT_EMPTY_SUMMARY,
+    DEFAULT_EMPTY_COMPARISON,
+    DEFAULT_EMPTY_TIMELINE,
     normalize_extracted_schema,
     normalize_summary_schema,
+    normalize_comparison_schema,
+    normalize_timeline_schema,
+    compute_deterministic_diff,
+    ALLOWED_EVENT_TYPES,
 )
 
 Base.metadata.create_all(bind=engine)
@@ -452,6 +470,213 @@ def format_version_summary_response(
         "is_owner_or_admin": is_owner_or_admin,
     }
 
+
+class DocumentVersionComparisonResponse(BaseModel):
+    id: int | None = None
+    document_id: int
+    from_version_id: int | None = None
+    to_version_id: int | None = None
+    from_version_number: int
+    to_version_number: int
+    from_source_hash: str | None = None
+    to_source_hash: str | None = None
+    status: str
+    material_changes: str | None = None
+    metadata_changes: dict = {}
+    summary_changes: dict = {}
+    ai_provider: str | None = None
+    ai_model: str | None = None
+    comparison_duration_ms: int | None = None
+    error_message: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    cached: bool = False
+    is_owner_or_admin: bool = False
+
+
+def format_version_comparison_response(
+    comparison: DocumentVersionComparison | None,
+    document_id: int,
+    from_version_number: int,
+    to_version_number: int,
+    from_version_id: int | None = None,
+    to_version_id: int | None = None,
+    from_source_hash: str | None = None,
+    to_source_hash: str | None = None,
+    is_owner_or_admin: bool = False,
+    cached: bool = False,
+) -> dict:
+    """Standardizes DocumentVersionComparison into API response dictionary with UTC ISO 8601 formatting."""
+    if not comparison:
+        return {
+            "id": None,
+            "document_id": document_id,
+            "from_version_id": from_version_id,
+            "to_version_id": to_version_id,
+            "from_version_number": from_version_number,
+            "to_version_number": to_version_number,
+            "from_source_hash": from_source_hash,
+            "to_source_hash": to_source_hash,
+            "status": "NOT_GENERATED",
+            "material_changes": None,
+            "metadata_changes": {"added": [], "removed": [], "changed": []},
+            "summary_changes": {
+                "facts_added": [],
+                "facts_removed": [],
+                "legal_issues_added": [],
+                "legal_issues_removed": [],
+                "important_points_added": [],
+                "important_points_removed": [],
+            },
+            "ai_provider": None,
+            "ai_model": None,
+            "comparison_duration_ms": None,
+            "error_message": None,
+            "created_at": None,
+            "updated_at": None,
+            "cached": False,
+            "is_owner_or_admin": is_owner_or_admin,
+        }
+
+    meta_changes = {"added": [], "removed": [], "changed": []}
+    if comparison.metadata_diff_json:
+        try:
+            meta_changes = json.loads(comparison.metadata_diff_json)
+        except Exception:
+            meta_changes = {"added": [], "removed": [], "changed": []}
+
+    summary_changes = {
+        "facts_added": [],
+        "facts_removed": [],
+        "legal_issues_added": [],
+        "legal_issues_removed": [],
+        "important_points_added": [],
+        "important_points_removed": [],
+    }
+    if comparison.summary_diff_json:
+        try:
+            summary_changes = json.loads(comparison.summary_diff_json)
+        except Exception:
+            summary_changes = {
+                "facts_added": [],
+                "facts_removed": [],
+                "legal_issues_added": [],
+                "legal_issues_removed": [],
+                "important_points_added": [],
+                "important_points_removed": [],
+            }
+
+    return {
+        "id": comparison.id,
+        "document_id": comparison.document_id,
+        "from_version_id": comparison.from_version_id,
+        "to_version_id": comparison.to_version_id,
+        "from_version_number": comparison.from_version_number,
+        "to_version_number": comparison.to_version_number,
+        "from_source_hash": comparison.from_source_hash,
+        "to_source_hash": comparison.to_source_hash,
+        "status": comparison.status or "NOT_GENERATED",
+        "material_changes": comparison.material_changes,
+        "metadata_changes": meta_changes,
+        "summary_changes": summary_changes,
+        "ai_provider": comparison.ai_provider,
+        "ai_model": comparison.ai_model,
+        "comparison_duration_ms": comparison.comparison_duration_ms,
+        "error_message": comparison.error_message,
+        "created_at": format_utc_iso(comparison.created_at),
+        "updated_at": format_utc_iso(comparison.updated_at),
+        "cached": cached,
+        "is_owner_or_admin": is_owner_or_admin,
+    }
+
+
+class TimelineEventResponse(BaseModel):
+    id: int | None = None
+    date: str | None = None
+    date_raw: str
+    event_type: str
+    description: str
+    source_reference: str | None = None
+    confidence: float | None = None
+    sequence_order: int = 0
+
+
+class DocumentVersionTimelineResponse(BaseModel):
+    document_id: int
+    version_id: int
+    version_number: int
+    source_hash: str
+    status: str
+    events: list[TimelineEventResponse] = []
+    ai_provider: str | None = None
+    ai_model: str | None = None
+    extraction_duration_ms: int | None = None
+    error_message: str | None = None
+    created_at: str
+    updated_at: str
+    cached: bool = False
+    is_owner_or_admin: bool = False
+
+
+def format_timeline_response(
+    timeline: DocumentVersionTimeline | None,
+    events: list[DocumentVersionTimelineEvent] | None = None,
+    document_id: int = 0,
+    version_number: int = 1,
+    version_id: int = 0,
+    source_hash: str = "",
+    is_owner_or_admin: bool = False,
+    cached: bool = False,
+) -> dict:
+    """Formats DocumentVersionTimeline and events into a standardized API dictionary."""
+    if not timeline:
+        return {
+            "document_id": document_id,
+            "version_id": version_id,
+            "version_number": version_number,
+            "source_hash": source_hash,
+            "status": "NOT_GENERATED",
+            "events": [],
+            "ai_provider": None,
+            "ai_model": None,
+            "extraction_duration_ms": None,
+            "error_message": None,
+            "created_at": format_utc_iso(datetime.now(timezone.utc)),
+            "updated_at": format_utc_iso(datetime.now(timezone.utc)),
+            "cached": False,
+            "is_owner_or_admin": is_owner_or_admin,
+        }
+
+    formatted_events = []
+    ev_list = events if events is not None else (timeline.events or [])
+    for ev in ev_list:
+        formatted_events.append({
+            "id": ev.id,
+            "date": ev.event_date,
+            "date_raw": ev.event_date_raw,
+            "event_type": ev.event_type,
+            "description": ev.event_description,
+            "source_reference": ev.source_reference,
+            "confidence": ev.confidence,
+            "sequence_order": ev.sequence_order,
+        })
+
+    return {
+        "document_id": timeline.document_id,
+        "version_id": timeline.version_id,
+        "version_number": timeline.version_number,
+        "source_hash": timeline.source_hash,
+        "status": timeline.status or "NOT_GENERATED",
+        "events": formatted_events,
+        "ai_provider": timeline.ai_provider,
+        "ai_model": timeline.ai_model,
+        "extraction_duration_ms": timeline.generation_duration_ms,
+        "error_message": timeline.error_message,
+        "created_at": format_utc_iso(timeline.created_at),
+        "updated_at": format_utc_iso(timeline.updated_at),
+        "cached": cached,
+        "is_owner_or_admin": is_owner_or_admin,
+    }
 
 
 LEGALVAULT_ENV = os.getenv("LEGALVAULT_ENV", "development").strip().lower()
@@ -2291,6 +2516,776 @@ def get_document_master_summary(
     )
 
 
+# --- AI Version Comparison & Query Endpoints ---
+
+def _ensure_version_analysis(document: Document, version: DocumentVersion, extractor: AIExtractor, db: Session) -> tuple[dict, dict]:
+    """
+    Ensures both metadata and summary are extracted and persisted for a version before comparison.
+    Returns (metadata_dict, summary_dict).
+    """
+    # 1. Metadata
+    meta_rec = db.query(DocumentVersionMetadata).filter(DocumentVersionMetadata.version_id == version.id).first()
+    meta_dict = None
+    if meta_rec and meta_rec.status == "COMPLETED" and meta_rec.source_hash == version.file_hash:
+        meta_dict = {
+            "document_type": meta_rec.document_type,
+            "case_number": meta_rec.case_number,
+            "court": meta_rec.court,
+            "jurisdiction": meta_rec.jurisdiction,
+            "subject": meta_rec.subject,
+            "parties": json.loads(meta_rec.parties_json or "[]"),
+            "dates": json.loads(meta_rec.dates_json or "[]"),
+            "keywords": json.loads(meta_rec.keywords_json or "[]"),
+        }
+    else:
+        file_path = get_version_file_path(version, document)
+        raw_meta, m_status, m_err, m_dur = extractor.process_document_version(
+            file_path,
+            version.file_type,
+            document_hint={"filename": version.filename, "case_number": document.case_number},
+        )
+        if not meta_rec:
+            meta_rec = DocumentVersionMetadata(
+                document_id=document.id,
+                version_id=version.id,
+                version_number=version.version_number,
+                source_hash=version.file_hash,
+                status=m_status,
+                ai_provider=extractor.provider_name,
+                ai_model=extractor.model_name,
+                extraction_duration_ms=m_dur,
+                error_message=m_err,
+            )
+            db.add(meta_rec)
+        else:
+            meta_rec.source_hash = version.file_hash
+            meta_rec.status = m_status
+            meta_rec.ai_provider = extractor.provider_name
+            meta_rec.ai_model = extractor.model_name
+            meta_rec.extraction_duration_ms = m_dur
+            meta_rec.error_message = m_err
+
+        if raw_meta:
+            meta_rec.document_type = raw_meta.get("document_type")
+            meta_rec.case_number = raw_meta.get("case_number")
+            meta_rec.court = raw_meta.get("court")
+            meta_rec.jurisdiction = raw_meta.get("jurisdiction")
+            meta_rec.subject = raw_meta.get("subject")
+            meta_rec.parties_json = json.dumps(raw_meta.get("parties", []))
+            meta_rec.dates_json = json.dumps(raw_meta.get("dates", []))
+            meta_rec.keywords_json = json.dumps(raw_meta.get("keywords", []))
+            meta_rec.confidence_json = json.dumps(raw_meta.get("confidence", {}))
+            meta_dict = raw_meta
+        else:
+            meta_dict = DEFAULT_EMPTY_METADATA
+
+        db.commit()
+        db.refresh(meta_rec)
+
+    # 2. Summary
+    sum_rec = db.query(DocumentVersionSummary).filter(DocumentVersionSummary.version_id == version.id).first()
+    sum_dict = None
+    if sum_rec and sum_rec.status == "COMPLETED" and sum_rec.source_hash == version.file_hash:
+        sum_dict = {
+            "summary": sum_rec.summary,
+            "key_facts": json.loads(sum_rec.key_facts_json or "[]"),
+            "legal_issues": json.loads(sum_rec.legal_issues_json or "[]"),
+            "important_points": json.loads(sum_rec.important_points_json or "[]"),
+        }
+    else:
+        file_path = get_version_file_path(version, document)
+        raw_sum, s_status, s_err, s_dur = extractor.generate_summary_for_file(
+            file_path,
+            version.file_type,
+            document_hint={"filename": version.filename, "case_number": document.case_number},
+        )
+        if not sum_rec:
+            sum_rec = DocumentVersionSummary(
+                document_id=document.id,
+                version_id=version.id,
+                version_number=version.version_number,
+                source_hash=version.file_hash,
+                status=s_status,
+                ai_provider=extractor.provider_name,
+                ai_model=extractor.model_name,
+                generation_duration_ms=s_dur,
+                error_message=s_err,
+            )
+            db.add(sum_rec)
+        else:
+            sum_rec.source_hash = version.file_hash
+            sum_rec.status = s_status
+            sum_rec.ai_provider = extractor.provider_name
+            sum_rec.ai_model = extractor.model_name
+            sum_rec.generation_duration_ms = s_dur
+            sum_rec.error_message = s_err
+
+        if raw_sum:
+            sum_rec.summary = raw_sum.get("summary")
+            sum_rec.key_facts_json = json.dumps(raw_sum.get("key_facts", []))
+            sum_rec.legal_issues_json = json.dumps(raw_sum.get("legal_issues", []))
+            sum_rec.important_points_json = json.dumps(raw_sum.get("important_points", []))
+            sum_dict = raw_sum
+        else:
+            sum_dict = DEFAULT_EMPTY_SUMMARY
+
+        db.commit()
+        db.refresh(sum_rec)
+
+    return meta_dict, sum_dict
+
+
+@app.post("/documents/{document_id}/compare", response_model=DocumentVersionComparisonResponse)
+def compare_document_versions(
+    document_id: int,
+    from_version: int,
+    to_version: int,
+    force: bool = False,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Compares two immutable revisions (V1 -> V2) of the same document.
+    - Directional analysis: returns what changed from from_version to to_version.
+    - RBAC: Allowed for Document Owner (Depositor) and Administrator.
+    - Shared Judges / Clients: Blocked with HTTP 403 (ACTION_DENIED).
+    - Caching: Returns cached COMPLETED comparison instantly unless force=True.
+    - Rejects cross-document comparison with HTTP 400.
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    # 1. Access Check: Must have access to document
+    if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to compare revisions for document #{document_id}",
+            metadata={"attempted_action": "COMPARE_VERSIONS", "from_version": from_version, "to_version": to_version},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: You do not have permission to compare revisions for document #{document_id}",
+        )
+
+    # 2. RBAC Guard: Only Owner or Admin can trigger AI comparison
+    if not check_document_ownership(document, current_user):
+        log_audit_event(
+            action=AuditEventType.ACTION_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason="Access forbidden: Only the document owner or an administrator can trigger AI version comparison.",
+            metadata={"attempted_action": "COMPARE_VERSIONS", "from_version": from_version, "to_version": to_version},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: Only the document owner or an administrator can trigger AI version comparison.",
+        )
+
+    # 3. Locate both DocumentVersion records
+    v1 = find_document_version(document_id, str(from_version), db)
+    if not v1:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Source version '{from_version}' not found for document #{document_id}",
+        )
+
+    v2 = find_document_version(document_id, str(to_version), db)
+    if not v2:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Target version '{to_version}' not found for document #{document_id}",
+        )
+
+    # 4. Strict Cross-Document Guard
+    if v1.document_id != document_id or v2.document_id != document_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cross-document comparison is strictly forbidden: both versions must belong to the same document.",
+        )
+
+    # 5. Handle Identical Version (from_version == to_version)
+    if v1.id == v2.id or from_version == to_version:
+        zero_diff = normalize_comparison_schema({
+            "material_changes": f"Both selected versions are identical (Version {from_version}). No differences exist.",
+            "metadata_changes": {"added": [], "removed": [], "changed": []},
+            "summary_changes": {
+                "facts_added": [],
+                "facts_removed": [],
+                "legal_issues_added": [],
+                "legal_issues_removed": [],
+                "important_points_added": [],
+                "important_points_removed": [],
+            }
+        })
+        return {
+            "id": None,
+            "document_id": document.id,
+            "from_version_id": v1.id,
+            "to_version_id": v2.id,
+            "from_version_number": from_version,
+            "to_version_number": to_version,
+            "from_source_hash": v1.file_hash,
+            "to_source_hash": v2.file_hash,
+            "status": "COMPLETED",
+            "material_changes": zero_diff["material_changes"],
+            "metadata_changes": zero_diff["metadata_changes"],
+            "summary_changes": zero_diff["summary_changes"],
+            "ai_provider": "deterministic",
+            "ai_model": "exact-identity",
+            "comparison_duration_ms": 0,
+            "error_message": None,
+            "created_at": format_utc_iso(datetime.now(timezone.utc)),
+            "updated_at": format_utc_iso(datetime.now(timezone.utc)),
+            "cached": False,
+            "is_owner_or_admin": True,
+        }
+
+    # 6. Check Cache (if force != True)
+    existing_comp = db.query(DocumentVersionComparison).filter(
+        DocumentVersionComparison.document_id == document.id,
+        DocumentVersionComparison.from_version_id == v1.id,
+        DocumentVersionComparison.to_version_id == v2.id,
+    ).first()
+
+    if existing_comp and existing_comp.status == "COMPLETED" and existing_comp.from_source_hash == v1.file_hash and existing_comp.to_source_hash == v2.file_hash and not force:
+        return format_version_comparison_response(
+            existing_comp,
+            document_id=document.id,
+            from_version_number=from_version,
+            to_version_number=to_version,
+            from_version_id=v1.id,
+            to_version_id=v2.id,
+            from_source_hash=v1.file_hash,
+            to_source_hash=v2.file_hash,
+            is_owner_or_admin=True,
+            cached=True,
+        )
+
+    # 7. Initialize AI Extractor
+    try:
+        extractor = AIExtractor()
+    except AIConfigurationError as e:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.AI_VERSION_COMPARISON_FAILED,
+            result=AuditResult.FAILED,
+            actor=current_user,
+            document=document,
+            reason=f"AI Configuration Error: {str(e)}",
+            metadata={"from_version": from_version, "to_version": to_version},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "AI_CONFIGURATION_ERROR",
+                "message": str(e),
+            }
+        )
+
+    # 8. Ensure dependencies (metadata and summary for v1 and v2)
+    v1_meta, v1_summary = _ensure_version_analysis(document, v1, extractor, db)
+    v2_meta, v2_summary = _ensure_version_analysis(document, v2, extractor, db)
+
+    # 9. Run comparison pipeline
+    comp_dict, status_str, error_msg, duration_ms = extractor.compare_versions_for_document(
+        v1_meta=v1_meta,
+        v2_meta=v2_meta,
+        v1_summary=v1_summary,
+        v2_summary=v2_summary,
+        from_version_number=from_version,
+        to_version_number=to_version,
+        document_hint={"filename": document.filename, "case_number": document.case_number},
+    )
+
+    # 10. Persist / Update comparison record
+    if not existing_comp:
+        existing_comp = DocumentVersionComparison(
+            document_id=document.id,
+            from_version_id=v1.id,
+            to_version_id=v2.id,
+            from_version_number=from_version,
+            to_version_number=to_version,
+            from_source_hash=v1.file_hash,
+            to_source_hash=v2.file_hash,
+            status=status_str,
+            ai_provider=extractor.provider_name,
+            ai_model=extractor.model_name,
+            comparison_duration_ms=duration_ms,
+            error_message=error_msg,
+        )
+        db.add(existing_comp)
+    else:
+        existing_comp.from_source_hash = v1.file_hash
+        existing_comp.to_source_hash = v2.file_hash
+        existing_comp.status = status_str
+        existing_comp.ai_provider = extractor.provider_name
+        existing_comp.ai_model = extractor.model_name
+        existing_comp.comparison_duration_ms = duration_ms
+        existing_comp.error_message = error_msg
+
+    if comp_dict:
+        existing_comp.material_changes = comp_dict.get("material_changes")
+        existing_comp.metadata_diff_json = json.dumps(comp_dict.get("metadata_changes", {}))
+        existing_comp.summary_diff_json = json.dumps(comp_dict.get("summary_changes", {}))
+
+    db.commit()
+    db.refresh(existing_comp)
+
+    # 11. Audit Logging (Sanitized operational metadata only)
+    if status_str == "COMPLETED":
+        log_audit_event(
+            db=db,
+            action=AuditEventType.AI_VERSION_COMPARISON_GENERATED,
+            result=AuditResult.SUCCESS,
+            actor=current_user,
+            document=document,
+            metadata={
+                "provider": extractor.provider_name,
+                "model": extractor.model_name,
+                "duration_ms": duration_ms,
+                "from_version": from_version,
+                "to_version": to_version,
+                "cached": False,
+            },
+        )
+    else:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.AI_VERSION_COMPARISON_FAILED,
+            result=AuditResult.FAILED,
+            actor=current_user,
+            document=document,
+            reason=error_msg,
+            metadata={
+                "provider": extractor.provider_name,
+                "model": extractor.model_name,
+                "duration_ms": duration_ms,
+                "from_version": from_version,
+                "to_version": to_version,
+                "status": status_str,
+            },
+        )
+
+    return format_version_comparison_response(
+        existing_comp,
+        document_id=document.id,
+        from_version_number=from_version,
+        to_version_number=to_version,
+        from_version_id=v1.id,
+        to_version_id=v2.id,
+        from_source_hash=v1.file_hash,
+        to_source_hash=v2.file_hash,
+        is_owner_or_admin=True,
+        cached=False,
+    )
+
+
+@app.get("/documents/{document_id}/compare", response_model=DocumentVersionComparisonResponse)
+def get_document_version_comparison(
+    document_id: int,
+    from_version: int,
+    to_version: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Retrieves existing comparison between two immutable revisions of a document."""
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to view comparison for document #{document_id}",
+            metadata={"attempted_action": "GET_VERSION_COMPARISON", "from_version": from_version, "to_version": to_version},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: You do not have permission to view comparison for document #{document_id}",
+        )
+
+    v1 = find_document_version(document_id, str(from_version), db)
+    if not v1:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Source version '{from_version}' not found for document #{document_id}",
+        )
+
+    v2 = find_document_version(document_id, str(to_version), db)
+    if not v2:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Target version '{to_version}' not found for document #{document_id}",
+        )
+
+    if v1.document_id != document_id or v2.document_id != document_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cross-document comparison is strictly forbidden: both versions must belong to the same document.",
+        )
+
+    is_owner_or_admin = check_document_ownership(document, current_user)
+
+    if v1.id == v2.id or from_version == to_version:
+        zero_diff = normalize_comparison_schema({
+            "material_changes": f"Both selected versions are identical (Version {from_version}). No differences exist.",
+            "metadata_changes": {"added": [], "removed": [], "changed": []},
+            "summary_changes": {
+                "facts_added": [],
+                "facts_removed": [],
+                "legal_issues_added": [],
+                "legal_issues_removed": [],
+                "important_points_added": [],
+                "important_points_removed": [],
+            }
+        })
+        return {
+            "id": None,
+            "document_id": document.id,
+            "from_version_id": v1.id,
+            "to_version_id": v2.id,
+            "from_version_number": from_version,
+            "to_version_number": to_version,
+            "from_source_hash": v1.file_hash,
+            "to_source_hash": v2.file_hash,
+            "status": "COMPLETED",
+            "material_changes": zero_diff["material_changes"],
+            "metadata_changes": zero_diff["metadata_changes"],
+            "summary_changes": zero_diff["summary_changes"],
+            "ai_provider": "deterministic",
+            "ai_model": "exact-identity",
+            "comparison_duration_ms": 0,
+            "error_message": None,
+            "created_at": format_utc_iso(datetime.now(timezone.utc)),
+            "updated_at": format_utc_iso(datetime.now(timezone.utc)),
+            "cached": False,
+            "is_owner_or_admin": is_owner_or_admin,
+        }
+
+    comp_rec = db.query(DocumentVersionComparison).filter(
+        DocumentVersionComparison.document_id == document.id,
+        DocumentVersionComparison.from_version_id == v1.id,
+        DocumentVersionComparison.to_version_id == v2.id,
+    ).first()
+
+    return format_version_comparison_response(
+        comp_rec,
+        document_id=document.id,
+        from_version_number=from_version,
+        to_version_number=to_version,
+        from_version_id=v1.id,
+        to_version_id=v2.id,
+        from_source_hash=v1.file_hash,
+        to_source_hash=v2.file_hash,
+        is_owner_or_admin=is_owner_or_admin,
+        cached=False,
+    )
+
+
+# --- AI Evidence Timeline Endpoints ---
+
+@app.post("/documents/{document_id}/versions/{version}/timeline", response_model=DocumentVersionTimelineResponse)
+def generate_version_timeline(
+    document_id: int,
+    version: str,
+    force: bool = False,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Extracts an AI-assisted Evidence Timeline for a specific immutable DocumentVersion.
+    - Grounded analytical chronological events extracted directly from document text.
+    - Strictly bound 1:1 to DocumentVersion.
+    - RBAC: Allowed for Document Owner (Depositor) and Administrator.
+    - Shared Judges / Clients: Blocked with HTTP 403 (ACTION_DENIED).
+    - Caching: Returns cached COMPLETED timeline instantly if source_hash matches and force=False.
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    # 1. Access Check: Must have access to document
+    if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to generate timeline for document #{document_id}",
+            metadata={"attempted_action": "GENERATE_TIMELINE", "version": version},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: You do not have permission to generate timeline for document #{document_id}",
+        )
+
+    # 2. RBAC Guard: Only Owner or Admin can trigger AI timeline generation
+    if not check_document_ownership(document, current_user):
+        log_audit_event(
+            action=AuditEventType.ACTION_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason="Access forbidden: Only the document owner or an administrator can trigger AI timeline generation.",
+            metadata={"attempted_action": "GENERATE_TIMELINE", "version": version},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: Only the document owner or an administrator can trigger AI timeline generation.",
+        )
+
+    # 3. Locate DocumentVersion
+    doc_ver = find_document_version(document_id, version, db)
+    if not doc_ver:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Version '{version}' not found for document #{document_id}",
+        )
+
+    # 4. Check Cache (if force != True)
+    existing_timeline = db.query(DocumentVersionTimeline).filter(
+        DocumentVersionTimeline.version_id == doc_ver.id,
+    ).first()
+
+    if existing_timeline and existing_timeline.status == "COMPLETED" and existing_timeline.source_hash == doc_ver.file_hash and not force:
+        events = db.query(DocumentVersionTimelineEvent).filter(
+            DocumentVersionTimelineEvent.timeline_id == existing_timeline.id
+        ).order_by(DocumentVersionTimelineEvent.sequence_order).all()
+        return format_timeline_response(
+            existing_timeline,
+            events=events,
+            document_id=document.id,
+            version_id=doc_ver.id,
+            version_number=doc_ver.version_number,
+            source_hash=doc_ver.file_hash,
+            is_owner_or_admin=True,
+            cached=True,
+        )
+
+    # 5. Initialize AI Extractor
+    try:
+        extractor = AIExtractor()
+    except AIConfigurationError as e:
+        log_audit_event(
+            db=db,
+            action=AuditEventType.AI_TIMELINE_GENERATION_FAILED,
+            result=AuditResult.FAILED,
+            actor=current_user,
+            document=document,
+            version=doc_ver,
+            reason=f"AI Configuration Error: {str(e)}",
+            metadata={"version_number": doc_ver.version_number},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "AI_CONFIGURATION_ERROR",
+                "message": str(e),
+            }
+        )
+
+    # 6. Resolve version file path on disk
+    file_path = get_version_file_path(doc_ver, document)
+
+    # 7. Execute timeline extraction
+    doc_hint = {
+        "filename": doc_ver.filename,
+        "case_number": document.case_number,
+        "document_type": doc_ver.file_type,
+    }
+    timeline_dict, status_str, error_msg, duration_ms = extractor.extract_timeline_for_file(
+        file_path,
+        file_type=doc_ver.file_type,
+        document_hint=doc_hint,
+    )
+
+    # 8. Create or update DocumentVersionTimeline record
+    if not existing_timeline:
+        existing_timeline = DocumentVersionTimeline(
+            document_id=document.id,
+            version_id=doc_ver.id,
+            version_number=doc_ver.version_number,
+            source_hash=doc_ver.file_hash,
+            status=status_str,
+            ai_provider=extractor.provider_name,
+            ai_model=extractor.model_name,
+            generation_duration_ms=duration_ms,
+            error_message=error_msg,
+        )
+        db.add(existing_timeline)
+        db.flush()
+    else:
+        existing_timeline.source_hash = doc_ver.file_hash
+        existing_timeline.status = status_str
+        existing_timeline.ai_provider = extractor.provider_name
+        existing_timeline.ai_model = extractor.model_name
+        existing_timeline.generation_duration_ms = duration_ms
+        existing_timeline.error_message = error_msg
+
+    # 9. Clean up any previous event rows for this timeline
+    db.query(DocumentVersionTimelineEvent).filter(
+        DocumentVersionTimelineEvent.timeline_id == existing_timeline.id
+    ).delete()
+
+    created_events = []
+    if timeline_dict and isinstance(timeline_dict.get("events"), list):
+        for ev in timeline_dict["events"]:
+            ev_rec = DocumentVersionTimelineEvent(
+                timeline_id=existing_timeline.id,
+                event_date=ev.get("date"),
+                event_date_raw=ev.get("date_raw", ""),
+                event_type=ev.get("event_type", "OTHER"),
+                event_description=ev.get("description", ""),
+                source_reference=ev.get("source_reference"),
+                confidence=ev.get("confidence", 0.90),
+                sequence_order=ev.get("sequence_order", 0),
+            )
+            db.add(ev_rec)
+            created_events.append(ev_rec)
+
+    db.commit()
+    db.refresh(existing_timeline)
+
+    # 10. Audit Logging
+    audit_action = AuditEventType.AI_TIMELINE_GENERATED if status_str == "COMPLETED" else AuditEventType.AI_TIMELINE_GENERATION_FAILED
+    audit_res = AuditResult.SUCCESS if status_str == "COMPLETED" else AuditResult.FAILED
+    log_audit_event(
+        db=db,
+        action=audit_action,
+        result=audit_res,
+        actor=current_user,
+        document=document,
+        version=doc_ver,
+        reason=f"AI evidence timeline generated for revision v{doc_ver.version_number} (status={status_str}, events={len(created_events)})",
+        metadata={
+            "document_id": document.id,
+            "version_number": doc_ver.version_number,
+            "provider": extractor.provider_name,
+            "model": extractor.model_name,
+            "duration_ms": duration_ms,
+            "event_count": len(created_events),
+            "cached": False,
+        },
+    )
+
+    return format_timeline_response(
+        existing_timeline,
+        events=created_events,
+        document_id=document.id,
+        version_id=doc_ver.id,
+        version_number=doc_ver.version_number,
+        source_hash=doc_ver.file_hash,
+        is_owner_or_admin=True,
+        cached=False,
+    )
+
+
+@app.get("/documents/{document_id}/versions/{version}/timeline", response_model=DocumentVersionTimelineResponse)
+def get_version_timeline(
+    document_id: int,
+    version: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieves the AI Evidence Timeline for a specific DocumentVersion.
+    - RBAC: Allowed for Owner, Admin, Shared Judge, and Shared Client.
+    - Unauthorized users: Blocked with HTTP 403 (ACCESS_DENIED).
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    if not check_document_access(document, current_user, db):
+        log_audit_event(
+            action=AuditEventType.ACCESS_DENIED,
+            result=AuditResult.DENIED,
+            actor=current_user,
+            document=document,
+            reason=f"Access forbidden: You do not have permission to view timeline for document #{document_id}",
+            metadata={"attempted_action": "GET_TIMELINE", "version": version},
+            isolated=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: You do not have permission to view timeline for document #{document_id}",
+        )
+
+    is_owner_or_admin = check_document_ownership(document, current_user)
+    doc_ver = find_document_version(document_id, version, db)
+    if not doc_ver:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Version '{version}' not found for document #{document_id}",
+        )
+
+    timeline_rec = db.query(DocumentVersionTimeline).filter(
+        DocumentVersionTimeline.version_id == doc_ver.id
+    ).first()
+
+    events = []
+    if timeline_rec:
+        events = db.query(DocumentVersionTimelineEvent).filter(
+            DocumentVersionTimelineEvent.timeline_id == timeline_rec.id
+        ).order_by(DocumentVersionTimelineEvent.sequence_order).all()
+
+    return format_timeline_response(
+        timeline_rec,
+        events=events,
+        document_id=document.id,
+        version_id=doc_ver.id,
+        version_number=doc_ver.version_number,
+        source_hash=doc_ver.file_hash,
+        is_owner_or_admin=is_owner_or_admin,
+        cached=False,
+    )
+
+
+@app.get("/documents/{document_id}/timeline", response_model=DocumentVersionTimelineResponse)
+def get_master_document_timeline(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Master document timeline endpoint: resolves to the active DocumentVersion's timeline.
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found in database",
+        )
+
+    active_ver = str(document.version or 1)
+    return get_version_timeline(document_id=document_id, version=active_ver, current_user=current_user, db=db)
+
+
 @app.post("/documents/{document_id}/verify")
 def verify_document(
     document_id: int,
@@ -2687,7 +3682,13 @@ def dev_reset_vault(
             detail="Development vault reset is strictly forbidden when LEGALVAULT_ENV is set to production.",
         )
 
-    # 1. Delete document summaries, metadata, versions, and shares first (maintains foreign key integrity)
+    # 1. Delete document comparisons, summaries, metadata, timelines, timeline events, versions, and shares first (maintains foreign key integrity)
+    events_count = db.query(DocumentVersionTimelineEvent).count()
+    db.query(DocumentVersionTimelineEvent).delete()
+    timelines_count = db.query(DocumentVersionTimeline).count()
+    db.query(DocumentVersionTimeline).delete()
+    comparisons_count = db.query(DocumentVersionComparison).count()
+    db.query(DocumentVersionComparison).delete()
     summaries_count = db.query(DocumentVersionSummary).count()
     db.query(DocumentVersionSummary).delete()
     meta_count = db.query(DocumentVersionMetadata).count()
@@ -2732,6 +3733,9 @@ def dev_reset_vault(
             "shares_deleted": shares_count,
             "metadata_deleted": meta_count,
             "summaries_deleted": summaries_count,
+            "comparisons_deleted": comparisons_count,
+            "timelines_deleted": timelines_count,
+            "timeline_events_deleted": events_count,
             "files_deleted": files_deleted,
         },
     )

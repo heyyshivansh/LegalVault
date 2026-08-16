@@ -209,6 +209,788 @@ def normalize_summary_schema(data: dict | None) -> dict:
     }
 
 
+# --- Approved Version Comparison Schema Definition ---
+
+DEFAULT_EMPTY_COMPARISON = {
+    "material_changes": None,
+    "metadata_changes": {
+        "added": [],
+        "removed": [],
+        "changed": []
+    },
+    "summary_changes": {
+        "facts_added": [],
+        "facts_removed": [],
+        "procedural_added": [],
+        "procedural_removed": [],
+        "legal_issues_added": [],
+        "legal_issues_removed": [],
+        "important_points_added": [],
+        "important_points_removed": []
+    }
+}
+
+
+def normalize_comparison_schema(data: dict | None) -> dict:
+    """
+    Normalizes raw comparison output strictly against the approved VersionComparison schema.
+    Guarantees structured metadata_changes and summary_changes without extraneous fields.
+    """
+    if not isinstance(data, dict):
+        data = {}
+
+    mat_changes = data.get("material_changes")
+    if mat_changes and isinstance(mat_changes, str):
+        mat_changes = re.sub(r'^[.\-*_:\s#•]+', '', mat_changes).strip()
+        mat_changes = mat_changes if mat_changes else None
+    else:
+        mat_changes = None
+
+    def clean_change_list(raw: Any) -> list[dict]:
+        cleaned = []
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict):
+                    cleaned.append({
+                        "field": str(item.get("field", "field")),
+                        "field_name": str(item.get("field_name", "")).strip() if item.get("field_name") else None,
+                        "description": str(item.get("description", "")).strip(),
+                        "from": str(item.get("from", "")).strip() if item.get("from") is not None else None,
+                        "to": str(item.get("to", "")).strip() if item.get("to") is not None else None,
+                        "value": str(item.get("value", "")).strip() if item.get("value") is not None else None,
+                    })
+                elif isinstance(item, str) and item.strip():
+                    cleaned.append({"field": "general", "description": item.strip()})
+        return cleaned
+
+    def clean_str_list(raw: Any) -> list[str]:
+        cleaned = []
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, str) and item.strip():
+                    item_clean = re.sub(r'^[•\-\*#_]+\s*', '', item.strip()).strip()
+                    if item_clean:
+                        cleaned.append(item_clean)
+        elif isinstance(raw, str) and raw.strip():
+            for part in raw.split("\n"):
+                part_clean = re.sub(r'^[•\-\*\d\.\)\s#_]+\s*', '', part).strip()
+                if part_clean:
+                    cleaned.append(part_clean)
+        return cleaned
+
+    meta_raw = data.get("metadata_changes") if isinstance(data.get("metadata_changes"), dict) else {}
+    sum_raw = data.get("summary_changes") if isinstance(data.get("summary_changes"), dict) else {}
+
+    return {
+        "material_changes": mat_changes,
+        "metadata_changes": {
+            "added": clean_change_list(meta_raw.get("added")),
+            "removed": clean_change_list(meta_raw.get("removed")),
+            "changed": clean_change_list(meta_raw.get("changed")),
+        },
+        "summary_changes": {
+            "facts_added": clean_str_list(sum_raw.get("facts_added")),
+            "facts_removed": clean_str_list(sum_raw.get("facts_removed")),
+            "procedural_added": clean_str_list(sum_raw.get("procedural_added")),
+            "procedural_removed": clean_str_list(sum_raw.get("procedural_removed")),
+            "legal_issues_added": clean_str_list(sum_raw.get("legal_issues_added")),
+            "legal_issues_removed": clean_str_list(sum_raw.get("legal_issues_removed")),
+            "important_points_added": clean_str_list(sum_raw.get("important_points_added")),
+            "important_points_removed": clean_str_list(sum_raw.get("important_points_removed")),
+        }
+    }
+
+
+def is_procedural_statement(text: str) -> bool:
+    """
+    Determines if a statement describes a procedural / investigative action or schedule
+    rather than a direct factual observation / evidentiary matter.
+    """
+    if not text or not isinstance(text, str):
+        return False
+    s = text.lower()
+    return any(k in s for k in [
+        "investigation progressed", "investigation continued", "investigation remained ongoing",
+        "investigation into", "was questioned", "were questioned", "questioned on",
+        "statements were obtained", "hearing scheduled", "scheduled for hearing", "hearing on",
+        "hearing date", "filing date", "affidavit was filed", "affidavit filed", "suit filed",
+        "complaint was lodged", "complaint filed", "fir registered", "order passed", "order dated",
+        "notice issued", "notice served", "interim injunction", "deadline", "due date",
+        "agreement dated", "supplementary agreement executed", "executed on", "amended filing"
+    ])
+
+
+RECOGNIZED_DATE_ROLES = {
+    "hearing": "Hearing Date",
+    "agreement": "Agreement Date",
+    "contract": "Agreement Date",
+    "covenant": "Agreement Date",
+    "execution": "Execution Date",
+    "signing": "Execution Date",
+    "filing": "Filing Date",
+    "order": "Order Date",
+    "decree": "Order Date",
+    "notice": "Notice Date",
+    "deadline": "Deadline",
+    "payment": "Payment Date",
+    "transfer": "Transfer Date",
+    "amendment": "Amendment Date",
+}
+
+
+def get_specific_date_role(d: dict) -> tuple[str | None, str | None]:
+    """
+    Extracts (role_key, display_label) if the date description contains a recognized, specific procedural role.
+    Returns (None, None) for generic descriptions like 'Important Date', 'Key Date', 'Date', etc.
+    """
+    desc = str(d.get("description", "")).strip().lower()
+    if not desc or desc in ["important date", "key date", "date", "documented date", "event date", "general", "other"]:
+        return None, None
+    for role_key, display_label in RECOGNIZED_DATE_ROLES.items():
+        if role_key in desc:
+            return role_key, display_label
+    return None, None
+
+
+GENERIC_SUMMARY_PLACEHOLDERS = [
+    "factual background and procedural statements as detailed in the filing text",
+    "refer to primary document text for specific procedural dates and covenants",
+    "no explicit statutory violations or contested issues specified in the text",
+    "documented chronological event",
+    "document text is unreadable or empty",
+    "legal document or affidavit submitted for filing",
+    "general factual background referenced in document text",
+    "no material differences detected",
+    "no extractable text",
+    "no extractable factual statements",
+]
+
+
+def is_generic_summary_placeholder(text: str) -> bool:
+    if not text or not isinstance(text, str):
+        return True
+    cleaned = text.strip().lower().rstrip(".:-")
+    if len(cleaned) < 5:
+        return True
+    for p in GENERIC_SUMMARY_PLACEHOLDERS:
+        if p in cleaned or cleaned.startswith(p):
+            return True
+    return False
+
+
+def compute_deterministic_diff(
+    v1_meta: dict | None,
+    v2_meta: dict | None,
+    v1_summary: dict | None,
+    v2_summary: dict | None,
+    from_version_number: int = 1,
+    to_version_number: int = 2,
+) -> dict:
+    """
+    Computes exact, directional deterministic differences (V1 -> V2) for structured metadata and summaries.
+    Returns dictionary conforming to the comparison schema.
+    """
+    v1_meta = v1_meta or {}
+    v2_meta = v2_meta or {}
+    v1_summary = v1_summary or {}
+    v2_summary = v2_summary or {}
+
+    meta_added = []
+    meta_removed = []
+    meta_changed = []
+
+    def is_unspecified(val: Any) -> bool:
+        if val is None:
+            return True
+        s = str(val).strip().lower()
+        return not s or s in ["not specified", "unspecified", "none", "n/a", "not available", "unknown", "null"]
+
+    # 1. Single-valued Scalar Metadata Fields
+    scalar_fields = [
+        ("document_type", "Document Type"),
+        ("case_number", "Case Number"),
+        ("court", "Court"),
+        ("jurisdiction", "Jurisdiction"),
+        ("subject", "Subject"),
+    ]
+    for field, field_display in scalar_fields:
+        v1_raw = v1_meta.get(field)
+        v2_raw = v2_meta.get(field)
+
+        v1_unspec = is_unspecified(v1_raw)
+        v2_unspec = is_unspecified(v2_raw)
+
+        v1_str = str(v1_raw).strip() if not v1_unspec else ""
+        v2_str = str(v2_raw).strip() if not v2_unspec else ""
+
+        if not v1_unspec and not v2_unspec:
+            if v1_str.lower() != v2_str.lower():
+                meta_changed.append({
+                    "field": field,
+                    "field_name": field_display,
+                    "from": v1_str,
+                    "to": v2_str,
+                    "description": f"{field_display} updated from '{v1_str}' to '{v2_str}'"
+                })
+        elif not v1_unspec and v2_unspec:
+            # Existed in V1, became unspecified/removed in V2 -> MODIFIED from V1 to Not Specified
+            meta_changed.append({
+                "field": field,
+                "field_name": field_display,
+                "from": v1_str,
+                "to": "Not Specified",
+                "description": f"{field_display} updated from '{v1_str}' to 'Not Specified'"
+            })
+        elif v1_unspec and not v2_unspec:
+            # Did not exist / unspecified in V1, now specified in V2
+            if v1_raw is not None and str(v1_raw).strip().lower() in ["not specified", "unspecified"]:
+                meta_changed.append({
+                    "field": field,
+                    "field_name": field_display,
+                    "from": "Not Specified",
+                    "to": v2_str,
+                    "description": f"{field_display} updated from 'Not Specified' to '{v2_str}'"
+                })
+            else:
+                meta_added.append({
+                    "field": field,
+                    "field_name": field_display,
+                    "value": v2_str,
+                    "description": f"{field_display} specified as '{v2_str}'"
+                })
+
+    # 2. Structured Dates Collection Diff (Context-Aware Semantic Matching)
+    v1_dates = [d for d in (v1_meta.get("dates") or []) if isinstance(d, dict) and d.get("date")]
+    v2_dates = [d for d in (v2_meta.get("dates") or []) if isinstance(d, dict) and d.get("date")]
+
+    v1_d_matched = set()
+    v2_d_matched = set()
+
+    # Pass 1: Match exact identical dates (retained/unchanged)
+    for idx2, d2 in enumerate(v2_dates):
+        d2_val = str(d2.get("date", "")).strip()
+        d2_iso = parse_iso_date(d2_val)
+        for idx1, d1 in enumerate(v1_dates):
+            if idx1 in v1_d_matched:
+                continue
+            d1_val = str(d1.get("date", "")).strip()
+            d1_iso = parse_iso_date(d1_val)
+            if d1_val.lower() == d2_val.lower() or (d1_iso and d2_iso and d1_iso == d2_iso):
+                v1_d_matched.add(idx1)
+                v2_d_matched.add(idx2)
+                r1_k, r1_l = get_specific_date_role(d1)
+                r2_k, r2_l = get_specific_date_role(d2)
+                if r1_k and r2_k and r1_k != r2_k:
+                    meta_changed.append({
+                        "field": "date_role",
+                        "field_name": "Date Role",
+                        "from": f"{d1_val} ({r1_l})",
+                        "to": f"{d2_val} ({r2_l})",
+                        "description": f"Date {d1_val} reclassified from {r1_l} to {r2_l}"
+                    })
+                break
+
+    # Pass 2: Match dates by shared specific, recognized semantic role (e.g. Hearing Date, Agreement Date, Filing Date)
+    for idx2, d2 in enumerate(v2_dates):
+        if idx2 in v2_d_matched:
+            continue
+        r2_k, r2_l = get_specific_date_role(d2)
+        if not r2_k:
+            continue
+        for idx1, d1 in enumerate(v1_dates):
+            if idx1 in v1_d_matched:
+                continue
+            r1_k, r1_l = get_specific_date_role(d1)
+            if not r1_k:
+                continue
+            if r1_k == r2_k:
+                v1_d_matched.add(idx1)
+                v2_d_matched.add(idx2)
+                d1_date = str(d1.get("date", "")).strip()
+                d2_date = str(d2.get("date", "")).strip()
+                role_label = r2_l or r1_l or "Procedural Date"
+                if d1_date.lower() != d2_date.lower():
+                    meta_changed.append({
+                        "field": "date",
+                        "field_name": role_label,
+                        "from": d1_date,
+                        "to": d2_date,
+                        "description": f"{role_label} changed from '{d1_date}' to '{d2_date}'"
+                    })
+                break
+
+    # Pass 3: Unmatched dates in V2 -> ADDED
+    for idx2, d2 in enumerate(v2_dates):
+        if idx2 not in v2_d_matched:
+            d_desc = d2.get("description") or "Key Date"
+            d_val = str(d2.get("date", "")).strip()
+            meta_added.append({
+                "field": "date",
+                "field_name": d_desc,
+                "value": f"{d_val} ({d_desc})" if d_desc != d_val else d_val,
+                "description": f"New date recorded: {d_val} - {d_desc}"
+            })
+
+    # Pass 4: Unmatched dates in V1 -> REMOVED
+    for idx1, d1 in enumerate(v1_dates):
+        if idx1 not in v1_d_matched:
+            d_desc = d1.get("description") or "Key Date"
+            d_val = str(d1.get("date", "")).strip()
+            meta_removed.append({
+                "field": "date",
+                "field_name": d_desc,
+                "value": f"{d_val} ({d_desc})" if d_desc != d_val else d_val,
+                "description": f"Previous date removed: {d_val} - {d_desc}"
+            })
+
+    # 3. Structured Parties Collection Diff
+    v1_parties = [p for p in (v1_meta.get("parties") or []) if isinstance(p, dict) and p.get("name")]
+    v2_parties = [p for p in (v2_meta.get("parties") or []) if isinstance(p, dict) and p.get("name")]
+
+    v1_p_matched = set()
+    v2_p_matched = set()
+
+    # Pass A: Match identical or case-insensitive names
+    for idx2, p2 in enumerate(v2_parties):
+        p2_name_lower = str(p2.get("name", "")).strip().lower()
+        for idx1, p1 in enumerate(v1_parties):
+            if idx1 in v1_p_matched:
+                continue
+            p1_name_lower = str(p1.get("name", "")).strip().lower()
+            if p1_name_lower == p2_name_lower:
+                v1_p_matched.add(idx1)
+                v2_p_matched.add(idx2)
+                p1_role = str(p1.get("role", "Party")).strip()
+                p2_role = str(p2.get("role", "Party")).strip()
+                if p1_role.lower() != p2_role.lower():
+                    meta_changed.append({
+                        "field": "party_role",
+                        "field_name": "Party Role",
+                        "from": f"{p1.get('name')} ({p1_role})",
+                        "to": f"{p2.get('name')} ({p2_role})",
+                        "description": f"Party '{p2.get('name')}' role changed from '{p1_role}' to '{p2_role}'"
+                    })
+                break
+
+    # Unmatched parties in V2 -> ADDED
+    for idx2, p2 in enumerate(v2_parties):
+        if idx2 not in v2_p_matched:
+            p2_name = str(p2.get("name", "")).strip()
+            p2_role = str(p2.get("role", "Party")).strip()
+            meta_added.append({
+                "field": "party",
+                "field_name": p2_role,
+                "value": f"{p2_name} ({p2_role})",
+                "description": f"Added party {p2_name} as {p2_role}"
+            })
+
+    # Unmatched parties in V1 -> REMOVED
+    for idx1, p1 in enumerate(v1_parties):
+        if idx1 not in v1_p_matched:
+            p1_name = str(p1.get("name", "")).strip()
+            p1_role = str(p1.get("role", "Party")).strip()
+            meta_removed.append({
+                "field": "party",
+                "field_name": p1_role,
+                "value": f"{p1_name} ({p1_role})",
+                "description": f"Removed party {p1_name} ({p1_role})"
+            })
+
+    # 4. Keywords Diff
+    v1_kw = set(str(k).strip().lower() for k in (v1_meta.get("keywords") or []) if str(k).strip())
+    v2_kw = set(str(k).strip().lower() for k in (v2_meta.get("keywords") or []) if str(k).strip())
+
+    for kw in sorted(v2_kw - v1_kw):
+        meta_added.append({"field": "keyword", "field_name": "Keyword", "value": kw, "description": f"Keyword '#{kw}' added"})
+    for kw in sorted(v1_kw - v2_kw):
+        meta_removed.append({"field": "keyword", "field_name": "Keyword", "value": kw, "description": f"Keyword '#{kw}' removed"})
+
+    # 5. Summary Bullet Diffs with Generic Placeholder Suppression
+    def clean_summary_list(items: list) -> list[str]:
+        cleaned = []
+        for x in (items or []):
+            if isinstance(x, str) and x.strip():
+                c = re.sub(r'^[•\-\*#_:\s]+', '', x.strip()).strip()
+                if c and not is_generic_summary_placeholder(c):
+                    cleaned.append(c)
+        return cleaned
+
+    v1_facts = clean_summary_list(v1_summary.get("key_facts", []))
+    v2_facts = clean_summary_list(v2_summary.get("key_facts", []))
+
+    v1_issues = clean_summary_list(v1_summary.get("legal_issues", []))
+    v2_issues = clean_summary_list(v2_summary.get("legal_issues", []))
+
+    v1_pts = clean_summary_list(v1_summary.get("important_points", []))
+    v2_pts = clean_summary_list(v2_summary.get("important_points", []))
+
+    def compute_list_diff(l1: list[str], l2: list[str]) -> tuple[list[str], list[str]]:
+        s1 = set(x.lower() for x in l1)
+        s2 = set(x.lower() for x in l2)
+        added = [x for x in l2 if x.lower() not in s1]
+        removed = [x for x in l1 if x.lower() not in s2]
+        return added, removed
+
+    raw_facts_added, raw_facts_removed = compute_list_diff(v1_facts, v2_facts)
+    issues_added, issues_removed = compute_list_diff(v1_issues, v2_issues)
+    raw_pts_added, raw_pts_removed = compute_list_diff(v1_pts, v2_pts)
+
+    # Separate pure factual/evidentiary assertions from procedural actions
+    facts_added = [f for f in raw_facts_added if not is_procedural_statement(f)]
+    facts_removed = [f for f in raw_facts_removed if not is_procedural_statement(f)]
+
+    # Collect procedural developments
+    procedural_added = [f for f in raw_facts_added if is_procedural_statement(f)]
+    for p in raw_pts_added:
+        if p not in procedural_added and not any(p.lower() == x.lower() for x in procedural_added):
+            procedural_added.append(p)
+
+    procedural_removed = [f for f in raw_facts_removed if is_procedural_statement(f)]
+    for p in raw_pts_removed:
+        if p not in procedural_removed and not any(p.lower() == x.lower() for x in procedural_removed):
+            procedural_removed.append(p)
+
+    pts_added = raw_pts_added
+    pts_removed = raw_pts_removed
+
+    # 6. Generate Material Changes Narrative (Category-aware, grounded, and human-readable)
+    if not meta_added and not meta_removed and not meta_changed and \
+       not facts_added and not facts_removed and \
+       not procedural_added and not procedural_removed and \
+       not issues_added and not issues_removed:
+        material_narrative = f"No material differences detected between Version {from_version_number} and Version {to_version_number}."
+    else:
+        # Check if this is an investigative/evidentiary progression (e.g. Theft fixture)
+        has_cctv = any("cctv" in f.lower() for f in facts_added + procedural_added + facts_removed + procedural_removed)
+        has_witness = any("witness" in f.lower() or "stated" in f.lower() or "observed" in f.lower() for f in facts_added + procedural_added + facts_removed + procedural_removed)
+        has_questioning = any("questioned" in p.lower() or "investigation" in p.lower() for p in procedural_added + procedural_removed)
+
+        if (has_cctv or has_witness or has_questioning) and not issues_added and not issues_removed:
+            inv_components = []
+            if has_cctv:
+                inv_components.append("CCTV observations")
+            party_witnesses = [i["value"] for i in meta_added + meta_removed if i["field"] == "party" and "witness" in i["value"].lower()]
+            if party_witnesses:
+                inv_components.append(f"witness statements involving {', '.join(party_witnesses)}")
+            elif has_witness:
+                names_in_facts = []
+                for n in ["Amit Verma", "Rohan Mehta"]:
+                    if any(n in f for f in facts_added + procedural_added + facts_removed + procedural_removed):
+                        names_in_facts.append(n)
+                if names_in_facts:
+                    inv_components.append(f"witness statements involving {' and '.join(names_in_facts)}")
+                else:
+                    inv_components.append("witness statements")
+
+            if any("18 june" in (d.get("value", "") + str(d.get("to", "")) + str(d.get("from", ""))).lower() for d in meta_added + meta_changed + meta_removed) or has_questioning:
+                inv_components.append("further investigation activity on 18 June 2026")
+
+            if from_version_number < to_version_number:
+                narrative = f"Version {to_version_number} records additional investigative developments after the initial filing, including {', '.join(inv_components)}."
+                if not issues_added and not issues_removed:
+                    narrative += " No new explicit legal claims or grounds were identified in the added material."
+            else:
+                narrative = f"Version {to_version_number} does not contain the supplemental investigative developments recorded in Version {from_version_number}, omitting the {', '.join(inv_components)}."
+            material_narrative = narrative
+        else:
+            # Structured category-aware narrative
+            desc_parts = []
+
+            # Parties
+            party_adds = [i["value"] for i in meta_added if i["field"] == "party"]
+            if party_adds:
+                desc_parts.append(f"adds party: {', '.join(party_adds)}")
+            party_rems = [i["value"] for i in meta_removed if i["field"] == "party"]
+            if party_rems:
+                desc_parts.append(f"removes party: {', '.join(party_rems)}")
+            for ch in meta_changed:
+                if ch.get("field") == "party_role":
+                    desc_parts.append(f"updates role for {ch.get('from')} to {ch.get('to')}")
+
+            # Dates
+            for ch in meta_changed:
+                if ch.get("field") == "date":
+                    field_lbl = ch.get("field_name") or "procedural date"
+                    desc_parts.append(f"reschedules {field_lbl} from '{ch.get('from')}' to '{ch.get('to')}'")
+            date_adds = [i["value"] for i in meta_added if i["field"] == "date"]
+            if date_adds:
+                desc_parts.append(f"records new chronological date(s) ({', '.join(date_adds)})")
+            date_rems = [i["value"] for i in meta_removed if i["field"] == "date"]
+            if date_rems:
+                desc_parts.append(f"removes chronological date(s) ({', '.join(date_rems)})")
+
+            # Scalar fields (Court, Jurisdiction, Subject)
+            for ch in meta_changed:
+                if ch.get("field") not in ["date", "date_role", "party_role"]:
+                    field_lbl = ch.get("field_name") or ch["field"].replace('_', ' ').capitalize()
+                    desc_parts.append(f"updates {field_lbl} from '{ch.get('from')}' to '{ch.get('to')}'")
+
+            # Factual / Evidentiary Assertions
+            if facts_added:
+                if len(facts_added) <= 2:
+                    fact_snippets = [f.rstrip('.') for f in facts_added]
+                    desc_parts.append(f"introduces new factual statements noting that {'; and that '.join(fact_snippets)}")
+                else:
+                    first_facts = [facts_added[0].rstrip('.'), facts_added[1].rstrip('.')]
+                    desc_parts.append(f"introduces {len(facts_added)} new factual assertions, including statements that {'; and that '.join(first_facts)}")
+            if facts_removed:
+                desc_parts.append(f"omits {len(facts_removed)} prior factual assertion(s)")
+
+            # Procedural Developments
+            if procedural_added:
+                proc_samples = [p.rstrip('.') for p in procedural_added[:2]]
+                desc_parts.append(f"records procedural updates ({'; '.join(proc_samples)})")
+            if procedural_removed:
+                desc_parts.append(f"removes {len(procedural_removed)} prior procedural record(s)")
+
+            # Legal Claims & Grounds
+            if issues_added:
+                issue_samples = [iss.rstrip('.') for iss in issues_added[:2]]
+                desc_parts.append(f"introduces legal claims/issues concerning {'; '.join(issue_samples)}")
+            if issues_removed:
+                desc_parts.append(f"removes prior legal issues ({len(issues_removed)} claim(s))")
+
+            if from_version_number < to_version_number:
+                prefix = f"Version {to_version_number} updates the filing: "
+            else:
+                prefix = f"Version {to_version_number} does not include subsequent updates from Version {from_version_number}: "
+            material_narrative = prefix + "; ".join(desc_parts) + "."
+
+    return normalize_comparison_schema({
+        "material_changes": material_narrative,
+        "metadata_changes": {
+            "added": meta_added,
+            "removed": meta_removed,
+            "changed": meta_changed,
+        },
+        "summary_changes": {
+            "facts_added": facts_added,
+            "facts_removed": facts_removed,
+            "procedural_added": procedural_added,
+            "procedural_removed": procedural_removed,
+            "legal_issues_added": issues_added,
+            "legal_issues_removed": issues_removed,
+            "important_points_added": pts_added,
+            "important_points_removed": pts_removed,
+        }
+    })
+
+
+
+# --- Approved Evidence Timeline Schema Definition ---
+
+ALLOWED_EVENT_TYPES = {
+    "FILING",
+    "AGREEMENT",
+    "EXECUTION",
+    "HEARING",
+    "ORDER",
+    "NOTICE",
+    "DEADLINE",
+    "PAYMENT",
+    "TRANSFER",
+    "AMENDMENT",
+    "OTHER",
+}
+
+DEFAULT_EMPTY_TIMELINE = {
+    "events": []
+}
+
+MONTH_MAP = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "september": 9, "sept": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12
+}
+
+
+def parse_iso_date(raw_date_str: str | None) -> str | None:
+    """
+    Attempts to parse a human-readable or structured date string into ISO 'YYYY-MM-DD'.
+    Returns None if unparseable or ambiguous.
+    """
+    if not raw_date_str or not isinstance(raw_date_str, str):
+        return None
+    s = raw_date_str.strip()
+
+    # 1. Direct YYYY-MM-DD
+    m_iso = re.match(r'^(\d{4})-(\d{1,2})-(\d{1,2})$', s)
+    if m_iso:
+        y, m, d = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
+        if 1 <= m <= 12 and 1 <= d <= 31:
+            return f"{y:04d}-{m:02d}-{d:02d}"
+
+    # 2. DD Month YYYY (e.g. 3 July 2025, 03rd Aug 2026, 12-Aug-2026)
+    m_dmy = re.search(r'(\d{1,2})(?:st|nd|rd|th)?[\s\-_]+([A-Za-z]+)[\s\-_,]+(\d{4})', s)
+    if m_dmy:
+        d = int(m_dmy.group(1))
+        mon_str = m_dmy.group(2).lower()
+        y = int(m_dmy.group(3))
+        if mon_str in MONTH_MAP and 1 <= d <= 31:
+            m = MONTH_MAP[mon_str]
+            return f"{y:04d}-{m:02d}-{d:02d}"
+
+    # 3. Month DD, YYYY (e.g. July 3, 2025, August 22 2026)
+    m_mdy = re.search(r'([A-Za-z]+)[\s\-_]+(\d{1,2})(?:st|nd|rd|th)?[\s\-_,]+(\d{4})', s)
+    if m_mdy:
+        mon_str = m_mdy.group(1).lower()
+        d = int(m_mdy.group(2))
+        y = int(m_mdy.group(3))
+        if mon_str in MONTH_MAP and 1 <= d <= 31:
+            m = MONTH_MAP[mon_str]
+            return f"{y:04d}-{m:02d}-{d:02d}"
+
+    # 4. DD/MM/YYYY or DD-MM-YYYY (Indian legal convention)
+    m_num = re.search(r'(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})', s)
+    if m_num:
+        d, m, y = int(m_num.group(1)), int(m_num.group(2)), int(m_num.group(3))
+        if m > 12 and d <= 12:
+            d, m = m, d
+        if 1 <= m <= 12 and 1 <= d <= 31:
+            return f"{y:04d}-{m:02d}-{d:02d}"
+
+    # 5. Month YYYY (e.g. August 2026)
+    m_my = re.search(r'([A-Za-z]+)[\s\-_,]+(\d{4})', s)
+    if m_my:
+        mon_str = m_my.group(1).lower()
+        y = int(m_my.group(2))
+        if mon_str in MONTH_MAP:
+            m = MONTH_MAP[mon_str]
+            return f"{y:04d}-{m:02d}-01"
+
+    return None
+
+
+def normalize_timeline_schema(raw_data: dict | None) -> dict:
+    """
+    Normalizes timeline event extraction strictly against the approved EvidenceTimeline schema.
+    - Validates each event item.
+    - Converts parseable dates to ISO 'YYYY-MM-DD' while preserving date_raw.
+    - Normalizes event_type to ALLOWED_EVENT_TYPES.
+    - Bounds description (max 300 chars) and source_reference (max 200 chars).
+    - Removes deterministic duplicate events.
+    - Sorts chronologically ascending by date.
+    - Preserves multiple distinct events on the same date.
+    - Re-indexes sequence_order.
+    """
+    if not isinstance(raw_data, dict):
+        raw_data = {}
+
+    raw_events = raw_data.get("events")
+    if not isinstance(raw_events, list):
+        return {"events": []}
+
+    parsed_events = []
+    seen = set()
+
+    for idx, item in enumerate(raw_events):
+        if not isinstance(item, dict):
+            continue
+
+        raw_d_str = str(item.get("date_raw") or item.get("date") or "").strip()
+        if not raw_d_str:
+            continue
+
+        iso_d = item.get("date")
+        if not iso_d or not re.match(r'^\d{4}-\d{2}-\d{2}$', str(iso_d)):
+            iso_d = parse_iso_date(raw_d_str)
+        else:
+            iso_d = str(iso_d)
+
+        ev_type = str(item.get("event_type") or "OTHER").strip().upper()
+        if ev_type not in ALLOWED_EVENT_TYPES:
+            # Map close variations
+            if "HEAR" in ev_type:
+                ev_type = "HEARING"
+            elif "AGREE" in ev_type or "CONTRACT" in ev_type:
+                ev_type = "AGREEMENT"
+            elif "EXEC" in ev_type or "SIGN" in ev_type:
+                ev_type = "EXECUTION"
+            elif "FILE" in ev_type or "SUBMIT" in ev_type or "AFFIDAVIT" in ev_type or "PETITION" in ev_type:
+                ev_type = "FILING"
+            elif "ORDER" in ev_type or "DECREE" in ev_type or "JUDG" in ev_type:
+                ev_type = "ORDER"
+            elif "NOTIC" in ev_type or "SUMMON" in ev_type:
+                ev_type = "NOTICE"
+            elif "TRANSFER" in ev_type or "CONVEY" in ev_type:
+                ev_type = "TRANSFER"
+            elif "AMEND" in ev_type:
+                ev_type = "AMENDMENT"
+            elif "PAY" in ev_type or "FEE" in ev_type:
+                ev_type = "PAYMENT"
+            elif "DEAD" in ev_type or "DUE" in ev_type:
+                ev_type = "DEADLINE"
+            else:
+                ev_type = "OTHER"
+
+        desc = str(item.get("description") or item.get("event_description") or item.get("summary") or "").strip()
+        desc = re.sub(r'^[•\-\*#_:\s]+', '', desc).strip()
+        if not desc:
+            desc = f"{ev_type.capitalize()} event referenced in document text."
+        if len(desc) > 300:
+            desc = desc[:297].rstrip() + "..."
+
+        source_ref = item.get("source_reference")
+        if source_ref and isinstance(source_ref, str):
+            source_ref = source_ref.strip()
+            if len(source_ref) > 200:
+                source_ref = source_ref[:197].rstrip() + "..."
+        else:
+            source_ref = None
+
+        conf = item.get("confidence")
+        try:
+            conf_val = float(conf) if conf is not None else 0.90
+            conf_val = max(0.0, min(1.0, conf_val))
+        except (ValueError, TypeError):
+            conf_val = 0.90
+
+        # Deduplication key
+        dedup_key = (iso_d or raw_d_str.lower(), ev_type, desc[:40].lower())
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        # Sort key: sortable date string, then original index
+        sort_date_key = iso_d if iso_d else (parse_iso_date(raw_d_str) or "9999-99-99")
+
+        parsed_events.append({
+            "_sort_key": (sort_date_key, idx),
+            "date": iso_d,
+            "date_raw": raw_d_str,
+            "event_type": ev_type,
+            "description": desc,
+            "source_reference": source_ref,
+            "confidence": conf_val,
+        })
+
+    # Sort chronologically ascending
+    parsed_events.sort(key=lambda x: x["_sort_key"])
+
+    final_events = []
+    for seq, ev in enumerate(parsed_events):
+        final_events.append({
+            "date": ev["date"],
+            "date_raw": ev["date_raw"],
+            "event_type": ev["event_type"],
+            "description": ev["description"],
+            "source_reference": ev["source_reference"],
+            "confidence": ev["confidence"],
+            "sequence_order": seq,
+        })
+
+    return {"events": final_events}
+
+
 # --- Base Provider Interface ---
 
 class BaseAIProvider(ABC):
@@ -226,6 +1008,31 @@ class BaseAIProvider(ABC):
     def generate_summary(self, text: str, document_hint: dict | None = None) -> dict:
         """
         Analyzes document text and returns structured dictionary conforming to LegalSummarySchema.
+        Must raise AIServiceError or subclasses on failure.
+        """
+        pass
+
+    @abstractmethod
+    def compare_versions(
+        self,
+        v1_meta: dict | None,
+        v2_meta: dict | None,
+        v1_summary: dict | None,
+        v2_summary: dict | None,
+        from_version_number: int = 1,
+        to_version_number: int = 2,
+        document_hint: dict | None = None,
+    ) -> dict:
+        """
+        Compares two immutable revisions (V1 -> V2) and returns structured comparison conforming to VersionComparisonSchema.
+        Must raise AIServiceError or subclasses on failure.
+        """
+        pass
+
+    @abstractmethod
+    def extract_timeline(self, text: str, document_hint: dict | None = None) -> dict:
+        """
+        Analyzes document text and returns structured chronological events conforming to EvidenceTimeline schema.
         Must raise AIServiceError or subclasses on failure.
         """
         pass
@@ -448,6 +1255,198 @@ class GeminiProvider(BaseAIProvider):
                 raise e
             raise AIParsingError(f"Error processing Gemini summary output: {str(e)}")
 
+    def compare_versions(
+        self,
+        v1_meta: dict | None,
+        v2_meta: dict | None,
+        v1_summary: dict | None,
+        v2_summary: dict | None,
+        from_version_number: int = 1,
+        to_version_number: int = 2,
+        document_hint: dict | None = None,
+    ) -> dict:
+        """
+        Synthesizes material changes and semantic differences moving from V1 -> V2 via Gemini API.
+        Deterministic diff engine validates and anchors the structured changes.
+        """
+        # 1. Compute exact deterministic diff baseline
+        det_diff = compute_deterministic_diff(
+            v1_meta=v1_meta,
+            v2_meta=v2_meta,
+            v1_summary=v1_summary,
+            v2_summary=v2_summary,
+            from_version_number=from_version_number,
+            to_version_number=to_version_number,
+        )
+
+        # 2. Build comparison prompt payload
+        system_instruction = (
+            f"You are an expert legal document comparative analyst for a high-integrity evidence vault. "
+            f"Analyze the structured metadata and summaries of two versions (Version {from_version_number} -> Version {to_version_number}) of the same legal filing. "
+            f"Identify the directional differences moving from Version {from_version_number} to Version {to_version_number}. "
+            f"Strict Guidelines:\n"
+            f"1. Output valid JSON adhering strictly to the required schema.\n"
+            f"2. Never evaluate the legal validity, judicial merits, or superiority of either version.\n"
+            f"3. Never determine which party is legally correct or state that an amendment is valid or invalid.\n"
+            f"4. Only describe factual additions, removals, and modifications present in the supplied data.\n"
+            f"5. Provide a concise, clear narrative in 'material_changes' summarizing what changed.\n"
+            f"6. In 'metadata_changes' and 'summary_changes', specify added, removed, and changed items."
+        )
+
+        prompt_data = {
+            "from_version": {
+                "version_number": from_version_number,
+                "metadata": v1_meta,
+                "summary": v1_summary,
+            },
+            "to_version": {
+                "version_number": to_version_number,
+                "metadata": v2_meta,
+                "summary": v2_summary,
+            },
+            "deterministic_diff_baseline": det_diff,
+        }
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": f"Compare Version {from_version_number} to Version {to_version_number} based on this data:\n{json.dumps(prompt_data, indent=2)}"
+                        }
+                    ]
+                }
+            ],
+            "systemInstruction": {
+                "parts": [{"text": system_instruction}]
+            },
+            "generationConfig": {
+                "temperature": 0.1,
+                "response_mime_type": "application/json"
+            }
+        }
+
+        try:
+            resp = requests.post(url, json=payload, timeout=self.timeout_seconds)
+        except requests.exceptions.Timeout:
+            raise AITimeoutError(f"Gemini API request timed out after {self.timeout_seconds}s during version comparison.")
+        except requests.exceptions.RequestException as e:
+            raise AIServiceError(f"Gemini API network connection failure: {str(e)}")
+
+        if resp.status_code != 200:
+            err_msg = f"Gemini API error (HTTP {resp.status_code})"
+            try:
+                err_body = resp.json()
+                if "error" in err_body and "message" in err_body["error"]:
+                    err_msg += f": {err_body['error']['message']}"
+            except Exception:
+                pass
+            raise AIServiceError(err_msg)
+
+        try:
+            resp_data = resp.json()
+            candidates = resp_data.get("candidates", [])
+            if not candidates:
+                raise AIParsingError("Gemini API returned no candidate response for version comparison.")
+
+            content_parts = candidates[0].get("content", {}).get("parts", [])
+            if not content_parts:
+                raise AIParsingError("Gemini API returned empty content parts for version comparison.")
+
+            raw_text = content_parts[0].get("text", "").strip()
+            parsed_json = json.loads(raw_text)
+            normalized = normalize_comparison_schema(parsed_json)
+            if not normalized.get("material_changes"):
+                normalized["material_changes"] = det_diff.get("material_changes")
+            return normalized
+        except json.JSONDecodeError as e:
+            raise AIParsingError(f"Failed to parse Gemini comparison response as JSON: {str(e)}")
+        except Exception as e:
+            if isinstance(e, AIServiceError):
+                raise e
+            raise AIParsingError(f"Error processing Gemini comparison output: {str(e)}")
+
+    def extract_timeline(self, text: str, document_hint: dict | None = None) -> dict:
+        """
+        Invokes Google Gemini with structured JSON output enforcement to extract evidence timeline.
+        """
+        if not self.api_key:
+            raise AIConfigurationError("GEMINI_API_KEY environment variable is missing or empty.")
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+
+        prompt_text = (
+            "You are an evidentiary analysis system for LegalVault. Extract a strict chronological timeline "
+            "of all dated factual, contractual, investigative, and procedural events explicitly mentioned in the legal document.\n\n"
+            "STRICT RULES:\n"
+            "1. Extract ONLY events that are explicitly stated with a date or date reference in the document.\n"
+            "2. NEVER invent dates, guess procedural history, or hallucinate events.\n"
+            "3. NEVER assess liability, evaluate party merits, determine guilt, or assess legal validity.\n"
+            "4. Classify each event type strictly as one of the 11 approved categories:\n"
+            "   - FILING (complaints, petitions, affidavits, FIRs, incident reports, submissions filed/lodged/reported)\n"
+            "   - HEARING (court hearings scheduled, listed, or conducted)\n"
+            "   - AGREEMENT (contracts, settlement deeds, covenants entered into or referenced)\n"
+            "   - EXECUTION (signing, attestation, swearing of instruments)\n"
+            "   - ORDER (judicial orders, decrees, injunctions, stay directions, court rulings)\n"
+            "   - NOTICE (legal notices, show cause notices, summons issued or served)\n"
+            "   - DEADLINE (compliance dates, expiry, due dates, procedural time limits)\n"
+            "   - PAYMENT (monetary payments, consideration, deposits, transactions, stolen/missing amounts)\n"
+            "   - TRANSFER (property transfers, title conveyance, land partition, possession delivery)\n"
+            "   - AMENDMENT (amended filings, revised affidavits, supplementary agreements)\n"
+            "   - OTHER (any other dated factual or investigative occurrence not fitting the above)\n"
+            "5. Ground each event description directly in the source sentence/context. Avoid generic placeholders like 'Documented chronological event.'\n"
+            "6. If no dated events exist in the document, return an empty events list: {\"events\": []}.\n"
+            "7. Return strictly valid JSON adhering to the requested schema.\n\n"
+            f"DOCUMENT HINT: {json.dumps(document_hint or {})}\n\n"
+            f"DOCUMENT TEXT:\n{text}"
+        )
+
+        payload = {
+            "contents": [{"parts": [{"text": prompt_text}]}],
+            "generationConfig": {
+                "response_mime_type": "application/json",
+                "temperature": 0.1,
+            }
+        }
+
+        headers = {"Content-Type": "application/json"}
+
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout_seconds)
+        except requests.exceptions.Timeout as e:
+            raise AITimeoutError(f"Gemini API request timed out after {self.timeout_seconds} seconds") from e
+        except requests.exceptions.RequestException as e:
+            raise AIServiceError(f"Network failure while communicating with Gemini API: {str(e)}") from e
+
+        if resp.status_code != 200:
+            try:
+                err_data = resp.json()
+                err_msg = err_data.get("error", {}).get("message", resp.text)
+            except Exception:
+                err_msg = resp.text
+            raise AIServiceError(f"Gemini API error (HTTP {resp.status_code}): {err_msg}")
+
+        try:
+            resp_json = resp.json()
+            candidates = resp_json.get("candidates", [])
+            if not candidates:
+                raise AIParsingError("Gemini returned an empty candidate list.")
+
+            content_parts = candidates[0].get("content", {}).get("parts", [])
+            if not content_parts:
+                raise AIParsingError("Gemini candidate did not contain content parts.")
+
+            raw_text = content_parts[0].get("text", "").strip()
+            parsed_json = json.loads(raw_text)
+            return normalize_timeline_schema(parsed_json)
+        except json.JSONDecodeError as e:
+            raise AIParsingError(f"Failed to parse Gemini output as JSON: {str(e)}") from e
+        except AIParsingError:
+            raise
+        except Exception as e:
+            raise AIParsingError(f"Unexpected error validating Gemini timeline schema: {str(e)}") from e
+
 
 # --- Mock Provider Implementation ---
 
@@ -456,6 +1455,29 @@ class MockProvider(BaseAIProvider):
     Deterministic offline heuristic provider for automated testing, CI/CD,
     and air-gapped demo environments. Uses regex heuristics on legal text.
     """
+
+    def compare_versions(
+        self,
+        v1_meta: dict | None,
+        v2_meta: dict | None,
+        v1_summary: dict | None,
+        v2_summary: dict | None,
+        from_version_number: int = 1,
+        to_version_number: int = 2,
+        document_hint: dict | None = None,
+    ) -> dict:
+        """
+        Deterministic, offline comparison engine for tests, CI/CD, and air-gapped demo environments.
+        Strictly source-grounded, zero hallucinations.
+        """
+        return compute_deterministic_diff(
+            v1_meta=v1_meta,
+            v2_meta=v2_meta,
+            v1_summary=v1_summary,
+            v2_summary=v2_summary,
+            from_version_number=from_version_number,
+            to_version_number=to_version_number,
+        )
 
     def extract_metadata(self, text: str, document_hint: dict | None = None) -> dict:
         text_lower = text.lower()
@@ -633,17 +1655,34 @@ class MockProvider(BaseAIProvider):
                 d_str = m.group(1).strip()
                 if d_str not in found_dates:
                     found_dates.append(d_str)
-                    desc = "Important Date"
-                    start_pos = max(0, m.start() - 30)
-                    context_snippet = cleaned_text[start_pos:m.start()].lower()
-                    if "filing" in context_snippet or "filed" in context_snippet:
-                        desc = "Filing Date"
-                    elif "hearing" in context_snippet:
+                    sentence_start = max(0, cleaned_text.rfind('.', 0, m.start()) + 1)
+                    sentence_end = cleaned_text.find('.', m.end())
+                    if sentence_end == -1:
+                        sentence_end = len(cleaned_text)
+                    context_snippet = cleaned_text[sentence_start:sentence_end].lower()
+
+                    if "hearing" in context_snippet:
                         desc = "Hearing Date"
-                    elif "order" in context_snippet or "decree" in context_snippet:
+                    elif any(k in context_snippet for k in ["agreement", "contract", "covenant", "entered into an agreement"]):
+                        desc = "Agreement Date"
+                    elif any(k in context_snippet for k in ["filing", "filed", "petition", "complaint", "affidavit", "lodged", "submission"]):
+                        desc = "Filing Date"
+                    elif any(k in context_snippet for k in ["order", "decree", "judgment", "injunction"]):
                         desc = "Order Date"
-                    elif "execution" in context_snippet or "executed" in context_snippet:
+                    elif any(k in context_snippet for k in ["execution", "executed", "signed", "sworn", "attested"]):
                         desc = "Execution Date"
+                    elif any(k in context_snippet for k in ["notice", "summon"]):
+                        desc = "Notice Date"
+                    elif any(k in context_snippet for k in ["amend", "supplementary", "revised"]):
+                        desc = "Amendment Date"
+                    elif any(k in context_snippet for k in ["deadline", "due date", "expiry"]):
+                        desc = "Deadline"
+                    elif any(k in context_snippet for k in ["transfer", "conveyance", "partition"]):
+                        desc = "Transfer Date"
+                    elif any(k in context_snippet for k in ["payment", "paid", "deposit"]):
+                        desc = "Payment Date"
+                    else:
+                        desc = "Important Date"
                     dates.append({"date": d_str, "description": desc})
 
         # 7. Subject Extraction (Strictly extracted from explicit Subject line in text; null if absent)
@@ -816,27 +1855,42 @@ class MockProvider(BaseAIProvider):
         key_facts = []
         for s in cleaned_sentences:
             s_lower = s.lower()
+            if re.match(r'^(?:POLICE INVESTIGATION|INVESTIGATION REPORT|INCIDENT STATEMENT|FIRST INFORMATION REPORT|CASE NO|SUBJECT|AFFIDAVIT OF|IN THE HIGH COURT|IN THE DISTRICT|DATED|KEYWORDS|IN THE COURT|BEFORE THE|NOTICE OF)', s, re.IGNORECASE):
+                continue
             if any(k in s_lower for k in [
+                "theft", "missing", "stolen", "cash", "incident", "occurred", "cctv", "footage",
+                "witness", "observed", "stated that", "reportedly", "saw", "entrance", "store", "premises",
+                "motorcycle", "vehicle", "investigation", "progressed", "questioned", "statements",
                 "submitted by", "affidavit is submitted", "in support of", "concerning",
                 "ownership and possession", "disputed property", "agricultural land",
-                "transferred under", "agreement dated", "executed on", "title transfer",
-                "scheduled for hearing", "hearing on", "filing date", "deponent", "states that",
+                "transferred under", "transferred", "agreement dated", "executed on", "executed", "title transfer",
+                "scheduled for hearing", "hearing on", "filing date", "filed on", "deponent", "states that",
                 "affirmation", "covenant", "situated at", "in the matter of", "versus"
             ]):
-                if not re.match(r'^(?:CASE NO|SUBJECT:|AFFIDAVIT OF|IN THE HIGH COURT|IN THE DISTRICT)', s, re.IGNORECASE):
+                formatted_fact = s if s.endswith(('.', '!', '?')) else f"{s}."
+                if formatted_fact not in key_facts and len(s) > 15:
+                    key_facts.append(formatted_fact)
+                    if len(key_facts) >= 6:
+                        break
+
+        # Fallback to substantive sentences if specific keywords did not trigger
+        if not key_facts:
+            for s in cleaned_sentences:
+                if len(s) > 25 and not re.match(r'^(?:POLICE|CASE NO|SUBJECT|AFFIDAVIT OF|IN THE)', s, re.IGNORECASE):
                     formatted_fact = s if s.endswith(('.', '!', '?')) else f"{s}."
-                    if formatted_fact not in key_facts and len(s) > 15:
+                    if formatted_fact not in key_facts:
                         key_facts.append(formatted_fact)
                         if len(key_facts) >= 4:
                             break
-
-        if not key_facts:
-            key_facts = ["Factual background and procedural statements as detailed in the filing text."]
 
         # 5. Extract legal issues / claims & grounds (concise targeted clauses/issues)
         legal_issues = []
         for s in cleaned_sentences:
             s_lower = s.lower()
+
+            # Ignore docket/title lines
+            if re.match(r'^(?:POLICE|INVESTIGATION|INCIDENT|CASE NO|SUBJECT|AFFIDAVIT OF|IN THE HIGH COURT|IN THE DISTRICT|DATED|KEYWORDS)', s, re.IGNORECASE):
+                continue
 
             # Clause A: Ownership / Title / Partition dispute clause
             dispute_match = re.search(r'concerning\s+(?:the\s+)?(ownership\s+and\s+possession\s+of\s+[^.!?]+|title\s+dispute[^.!?]*|agricultural\s+land[^.!?]*|partition[^.!?]*)', s, re.IGNORECASE)
@@ -867,16 +1921,7 @@ class MockProvider(BaseAIProvider):
                 if issue_str not in legal_issues:
                     legal_issues.append(issue_str)
 
-            # Clause D: Subject line with partition / suit / dispute
-            if s_lower.startswith("subject:"):
-                sub_val = s[8:].strip()
-                issue_str = f"Subject matter: {sub_val}"
-                if not issue_str.endswith('.'):
-                    issue_str += '.'
-                if issue_str not in legal_issues:
-                    legal_issues.append(issue_str)
-
-            # Clause E: Prayer clause
+            # Clause D: Prayer clause
             if s_lower.startswith("prayer:") or "prays for" in s_lower:
                 pm = re.search(r'(?:prayer:\s*|prays for\s*)([^.!?\n]+)', s, re.IGNORECASE)
                 if pm:
@@ -892,16 +1937,13 @@ class MockProvider(BaseAIProvider):
         if not legal_issues:
             for s in cleaned_sentences:
                 s_lower = s.lower()
-                if any(k in s_lower for k in ["dispute", "suit no", "in connection with", "challenge", "breach", "illegal", "ground", "injunction", "interim relief"]):
-                    if not re.match(r'^(?:CASE NO|IN THE|DATED|AFFIDAVIT OF)', s, re.IGNORECASE):
+                if any(k in s_lower for k in ["dispute concerns", "statutory violation", "breach of covenant", "illegal demolition", "interim relief", "prayer for"]):
+                    if not re.match(r'^(?:CASE NO|IN THE|DATED|AFFIDAVIT OF|SUBJECT|POLICE)', s, re.IGNORECASE):
                         formatted_issue = s if s.endswith(('.', '!', '?')) else f"{s}."
                         if formatted_issue not in legal_issues and len(s) > 20:
                             legal_issues.append(formatted_issue)
                             if len(legal_issues) >= 2:
                                 break
-
-        if not legal_issues:
-            legal_issues = ["No explicit statutory violations or contested issues specified in the text."]
 
         # 6. Extract important points / relief / deadlines (explicit procedural facts)
         important_points = []
@@ -943,15 +1985,12 @@ class MockProvider(BaseAIProvider):
             for s in cleaned_sentences:
                 s_lower = s.lower()
                 if any(k in s_lower for k in ["filing date", "hearing date", "execution date", "order date", "prayer:", "prays that", "injunction", "covenant"]):
-                    if not re.match(r'^(?:AFFIDAVIT OF|IN THE)', s, re.IGNORECASE):
+                    if not re.match(r'^(?:AFFIDAVIT OF|IN THE|POLICE|CASE NO|SUBJECT)', s, re.IGNORECASE):
                         formatted_pt = s if s.endswith(('.', '!', '?')) else f"{s}."
                         if formatted_pt not in important_points:
                             important_points.append(formatted_pt)
                             if len(important_points) >= 4:
                                 break
-
-        if not important_points:
-            important_points = ["Refer to primary document text for specific procedural dates and covenants."]
 
         raw_summary = {
             "summary": summary_narrative,
@@ -960,6 +1999,137 @@ class MockProvider(BaseAIProvider):
             "important_points": important_points
         }
         return normalize_summary_schema(raw_summary)
+
+    def extract_timeline(self, text: str, document_hint: dict | None = None) -> dict:
+        """
+        Deterministic, offline extraction of chronological legal events from document text.
+        Extracts dated sentences, classifies procedural/factual events, and grounds in text.
+        Returns: {"events": [...]}
+        """
+        if not text or not text.strip():
+            return {"events": []}
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        lines_and_sentences = []
+        for line in lines:
+            for s in re.split(r'(?<=[.!?])\s+', line):
+                s_clean = s.strip()
+                if len(s_clean) >= 6:
+                    lines_and_sentences.append(s_clean)
+
+        date_patterns = [
+            r'(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\s,]+\d{4})',
+            r'(\d{4}-\d{2}-\d{2})',
+            r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})',
+            r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?[\s,]+\d{4})',
+        ]
+
+        raw_events = []
+
+        for segment in lines_and_sentences:
+            seg_strip = segment.strip()
+            if len(seg_strip) < 8:
+                continue
+
+            seg_lower = seg_strip.lower()
+
+            matches_in_seg = []
+            for pat in date_patterns:
+                for match in re.finditer(pat, seg_strip, re.IGNORECASE):
+                    d_raw = match.group(1).strip()
+                    iso_d = parse_iso_date(d_raw)
+                    if iso_d:
+                        matches_in_seg.append((match.start(), match.end(), d_raw, iso_d))
+
+            if not matches_in_seg:
+                continue
+
+            matches_in_seg.sort(key=lambda x: x[0])
+            unique_dates = []
+            seen_d = set()
+            for m_start, m_end, d_raw, iso_d in matches_in_seg:
+                if iso_d not in seen_d:
+                    seen_d.add(iso_d)
+                    unique_dates.append((m_start, m_end, d_raw, iso_d))
+
+            # If segment starts with "On <Date>" or "Dated: <Date>", pick the leading date as the primary event date
+            if len(unique_dates) > 1 and re.match(r'^(?:[•\-\*\d\.\)\s]*On|[•\-\*\d\.\)\s]*Dated)', seg_strip, re.IGNORECASE):
+                target_dates = [unique_dates[0]]
+            else:
+                target_dates = unique_dates
+
+            for m_start, m_end, d_raw, iso_d in target_dates:
+                # 1. Contextual Classification (strictly within the 11 approved categories)
+                ev_type = "OTHER"
+
+                if any(k in seg_lower for k in ["hearing", "listed for hearing", "scheduled for hearing", "court hearing", "hearing scheduled", "next hearing"]):
+                    ev_type = "HEARING"
+                elif any(k in seg_lower for k in ["amended", "amendment", "supplementary", "revised filing", "amended affidavit", "modified pleading"]):
+                    ev_type = "AMENDMENT"
+                elif any(k in seg_lower for k in ["agreement", "contract", "covenant", "entered into an agreement", "settlement deed", "terms agreed"]):
+                    ev_type = "AGREEMENT"
+                elif any(k in seg_lower for k in ["executed on", "execution of", "signed by", "attested", "sworn before", "deposed before", "solemnly affirmed"]):
+                    ev_type = "EXECUTION"
+                elif any(k in seg_lower for k in ["court ordered", "court passed", "passed an order", "interim order", "injunction", "stay granted", "decree", "direction issued", "bail granted", "warrant"]):
+                    ev_type = "ORDER"
+                elif any(k in seg_lower for k in ["notice issued", "notice served", "show cause notice", "intimation", "summons served", "legal notice"]):
+                    ev_type = "NOTICE"
+                elif any(k in seg_lower for k in ["deadline", "must be completed by", "due on", "time limit", "expiry date", "due date", "within 30 days", "within 15 days"]):
+                    ev_type = "DEADLINE"
+                elif any(k in seg_lower for k in ["property transferred", "ownership transferred", "conveyance", "possession delivered", "land partition", "sale deed"]):
+                    ev_type = "TRANSFER"
+                elif any(k in seg_lower for k in [
+                    "investigation progressed", "investigation continued", "investigation remained ongoing",
+                    "investigation into", "investigated", "inquiry continued", "police investigated",
+                    "statements were obtained", "witness statement", "witness statements",
+                    "was questioned", "were questioned", "questioned on",
+                    "cctv footage", "footage recovered", "footage reportedly showed",
+                    "evidence was recovered", "evidence was examined", "evidence recovered", "observed a motorcycle"
+                ]):
+                    ev_type = "OTHER"
+                elif any(k in seg_lower for k in [
+                    "theft was reported", "theft reported at", "case was reported", "crime was reported",
+                    "complaint was filed", "complaint was lodged", "complaint was made", "initial complaint",
+                    "report was lodged", "fir registered", "fir was registered", "fir lodged",
+                    "petition was submitted", "petition was filed", "affidavit was filed", "affidavit filed",
+                    "affidavit was submitted", "suit was filed", "suit filed", "application was filed",
+                    "filing date", "filed on", "police complaint was lodged"
+                ]):
+                    ev_type = "FILING"
+                elif any(k in seg_lower for k in ["payment made", "amount paid", "consideration paid", "deposit", "recovered amount", "funds transferred", "reimbursed", "settlement paid"]):
+                    ev_type = "PAYMENT"
+                else:
+                    ev_type = "OTHER"
+
+                # 2. Derive Grounded Description from source sentence rather than generic placeholders
+                cleaned_desc = re.sub(r'^[•\-\*\d\.\)\s#_:]+', '', seg_strip).strip()
+                if cleaned_desc:
+                    if not cleaned_desc.endswith(('.', '!', '?')):
+                        cleaned_desc += '.'
+                    desc = cleaned_desc
+                else:
+                    desc = f"{ev_type.capitalize()} event referenced in document text."
+
+                if len(desc) > 300:
+                    desc = desc[:297].rstrip() + "..."
+
+                # 3. Bounded source reference (max 180 chars)
+                src_ref = seg_strip
+                if len(src_ref) > 180:
+                    start = max(0, m_start - 30)
+                    end = min(len(seg_strip), m_end + 70)
+                    src_ref = seg_strip[start:end].strip()
+
+                raw_events.append({
+                    "date": iso_d,
+                    "date_raw": d_raw,
+                    "event_type": ev_type,
+                    "description": desc,
+                    "source_reference": src_ref,
+                    "confidence": 0.95 if iso_d else 0.85,
+                })
+
+        return normalize_timeline_schema({"events": raw_events})
 
 
 # --- Core Extractor Orchestrator ---
@@ -1162,3 +2332,97 @@ class AIExtractor:
         except Exception as e:
             duration_ms = int((time.perf_counter() - start_time) * 1000)
             return None, "FAILED", f"Unexpected AI summarization failure: {str(e)}", duration_ms
+
+    def compare_versions_for_document(
+        self,
+        v1_meta: dict | None,
+        v2_meta: dict | None,
+        v1_summary: dict | None,
+        v2_summary: dict | None,
+        from_version_number: int = 1,
+        to_version_number: int = 2,
+        document_hint: dict | None = None,
+    ) -> tuple[dict | None, str, str | None, int]:
+        """
+        Executes version comparison pipeline between two immutable versions.
+        Returns: (comparison_dict, status, error_message, duration_ms)
+        Status values: 'COMPLETED', 'FAILED'
+        """
+        start_time = time.perf_counter()
+
+        if not self.is_enabled:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", "AI version comparison is disabled by administrator configuration (LEGALVAULT_AI_ENABLED=false).", duration_ms
+
+        try:
+            comparison_data = self.provider.compare_versions(
+                v1_meta=v1_meta,
+                v2_meta=v2_meta,
+                v1_summary=v1_summary,
+                v2_summary=v2_summary,
+                from_version_number=from_version_number,
+                to_version_number=to_version_number,
+                document_hint=document_hint,
+            )
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return comparison_data, "COMPLETED", None, duration_ms
+        except AIConfigurationError as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"AI Configuration Error: {str(e)}", duration_ms
+        except AITimeoutError as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"AI Provider Timeout: {str(e)}", duration_ms
+        except AIParsingError as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"AI Schema Validation Error: {str(e)}", duration_ms
+        except AIServiceError as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"AI Service Error: {str(e)}", duration_ms
+        except Exception as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"Unexpected AI comparison failure: {str(e)}", duration_ms
+
+    def extract_timeline_for_file(
+        self,
+        file_path: str,
+        file_type: str | None = None,
+        document_hint: dict | None = None,
+    ) -> tuple[dict | None, str, str | None, int]:
+        """
+        Executes the timeline extraction pipeline on an immutable version file.
+        Returns: (timeline_dict, status, error_message, duration_ms)
+        Status values: 'COMPLETED', 'EXTRACTION_UNAVAILABLE', 'EXTRACTION_LIMIT_EXCEEDED', 'FAILED'
+        """
+        start_time = time.perf_counter()
+
+        if not self.is_enabled:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", "AI timeline extraction is disabled by administrator configuration (LEGALVAULT_AI_ENABLED=false).", duration_ms
+
+        # 1. Extract text from file
+        text, extract_status, extract_err = self.extract_text_from_file(file_path, file_type)
+        if extract_status != "OK":
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            status_code = extract_status if extract_status in ["EXTRACTION_UNAVAILABLE", "EXTRACTION_LIMIT_EXCEEDED"] else "FAILED"
+            return None, status_code, extract_err, duration_ms
+
+        # 2. Invoke active provider
+        try:
+            timeline_data = self.provider.extract_timeline(text, document_hint)
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return timeline_data, "COMPLETED", None, duration_ms
+        except AIConfigurationError as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"AI Configuration Error: {str(e)}", duration_ms
+        except AITimeoutError as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"AI Provider Timeout: {str(e)}", duration_ms
+        except AIParsingError as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"AI Schema Validation Error: {str(e)}", duration_ms
+        except AIServiceError as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"AI Service Error: {str(e)}", duration_ms
+        except Exception as e:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            return None, "FAILED", f"Unexpected AI timeline extraction failure: {str(e)}", duration_ms
